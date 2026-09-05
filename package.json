@@ -1,0 +1,36 @@
+{
+  "name": "dev-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "General-purpose AI Development Orchestrator",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "dev-agent": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx src/cli/index.ts"
+  },
+  "dependencies": {
+    "@langchain/langgraph": "^1.4.14",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.4",
+    "commander": "^15.0.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.4.1",
+    "eslint": "^10.10.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^5.0.0"
+  }
+}
