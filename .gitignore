@@ -3,3 +3,9 @@ dist/
 .orchestrator/
 .env
 *.log
+
+# Local project data. The project store is intentionally human-readable and
+# diffable, but it holds a USER's projects - it is not source of this repo.
+# Version your own projects/ directory separately if you want that history.
+projects/*
+!projects/.gitkeep
