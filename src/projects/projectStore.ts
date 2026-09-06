@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   Project,
@@ -29,6 +30,7 @@ import {
  *     runs/             one JSON per workflow run
  *     history/          one JSONL per run (see events/)
  *     grants/           one JSON per implementation grant (Phase 4A)
+ *                       plus <grantId>.claim - the one-shot consumption marker
  *     implementations/  one JSON per implementation run (Phase 4A)
  *     activity/         one JSONL per implementation run (Phase 4A)
  *     implementation.lock  present while a mutating run holds the project
@@ -206,9 +208,87 @@ export class ProjectStore {
     return parsed;
   }
 
+  /**
+   * Read a grant, with the CLAIM MARKER treated as authoritative over the JSON.
+   *
+   * Consumption is committed by creating `<grantId>.claim` exclusively, and the
+   * status field in the JSON is updated immediately afterwards - but those are
+   * two operations, and a process can die between them. If the JSON were the
+   * source of truth, that crash would leave a claimed grant reading `active`
+   * and a second attempt could use it.
+   *
+   * So the marker decides. It is created by a single atomic syscall, which makes
+   * "has this grant been claimed?" answerable by one indivisible fact rather
+   * than by a two-step write that can be interrupted halfway.
+   */
   getGrant(projectId: string, grantId: string): TGrant | null {
     const raw = this.readJson<unknown>(this.sub(projectId, "grants", `${grantId}.json`));
-    return raw ? ImplementationGrant.parse(raw) : null;
+    if (!raw) return null;
+    const grant = ImplementationGrant.parse(raw);
+    if (grant.status === "active" && this.isGrantClaimed(projectId, grantId)) {
+      return { ...grant, status: "consumed" };
+    }
+    return grant;
+  }
+
+  private grantClaimFile(projectId: string, grantId: string): string {
+    return this.sub(projectId, "grants", `${grantId}.claim`);
+  }
+
+  /** Has an implementation attempt already claimed this grant? */
+  isGrantClaimed(projectId: string, grantId: string): boolean {
+    return fs.existsSync(this.grantClaimFile(projectId, grantId));
+  }
+
+  /**
+   * CLAIM A GRANT FOR ONE IMPLEMENTATION ATTEMPT. Atomic, and one-shot.
+   *
+   *   > One human approval produces one bounded implementation grant, and that
+   *   > grant authorises at most one implementation attempt.
+   *
+   * `open(..., "wx")` creates the marker exclusively: on both POSIX and Windows
+   * exactly one caller can succeed, and every other gets EEXIST. Two processes
+   * racing for the same grant therefore cannot both proceed, and the loser is
+   * refused rather than queued - the failure direction is closed.
+   *
+   * This does NOT lean on the project lock. The lock serialises mutation of a
+   * project; this makes the grant itself single-use, including for a read-only
+   * grant that never takes a lock at all.
+   *
+   * @returns the consumed grant, or null if it was already claimed.
+   */
+  claimGrant(projectId: string, grantId: string): TGrant | null {
+    const claimFile = this.grantClaimFile(projectId, grantId);
+    fs.mkdirSync(path.dirname(claimFile), { recursive: true });
+
+    let handle: number;
+    try {
+      handle = fs.openSync(claimFile, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
+      throw error;
+    }
+
+    // The claim is already committed by the open above. Everything below is
+    // record-keeping; if it fails, the grant stays consumed - which is the
+    // conservative direction.
+    try {
+      fs.writeFileSync(
+        handle,
+        `${JSON.stringify(
+          { grantId, claimedAt: new Date().toISOString(), pid: process.pid, hostname: os.hostname() },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+    } finally {
+      fs.closeSync(handle);
+    }
+
+    const grant = this.getGrant(projectId, grantId);
+    if (!grant) return null;
+    return this.saveGrant({ ...grant, status: "consumed" });
   }
 
   listGrants(projectId: string): TGrant[] {

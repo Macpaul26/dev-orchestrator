@@ -159,6 +159,25 @@ export const ActivityRecord = z.discriminatedUnion("type", [
     scopeDrift: z.number().int().nonnegative().default(0),
   }),
 
+  /**
+   * The grant was claimed for this attempt and is now permanently unusable.
+   *
+   * Metadata only: which grant, when, and by which process. Written by the
+   * orchestrator at the moment of the atomic claim - an agent has no way to
+   * forge it, suppress it, or delete it.
+   */
+  z.object({
+    type: z.literal("grant_consumed"),
+    ...base,
+    claimedByPid: z.number().int().nonnegative(),
+    claimedByHost: z.string(),
+  }),
+  z.object({
+    type: z.literal("grant_reuse_denied"),
+    ...base,
+    reason: DenialReason,
+    detail: z.string(),
+  }),
   z.object({ type: z.literal("lock_acquired"), ...base, holder: z.string() }),
   z.object({ type: z.literal("lock_released"), ...base }),
   z.object({

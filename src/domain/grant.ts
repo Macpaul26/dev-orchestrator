@@ -37,8 +37,34 @@ import { DenialReason } from "./denial.js";
  * it is not papered over here.
  */
 
+/**
+ * THE GRANT LIFECYCLE
+ *
+ *   active    issued by a human approval, never yet claimed
+ *   consumed  an implementation attempt has CLAIMED it - permanently unusable
+ *   revoked   withdrawn
+ *   expired   past `expiresAt`
+ *
+ * `consumed` is terminal and irreversible. It is reached by claiming the grant,
+ * not by finishing successfully: a run that failed, was cancelled, or whose
+ * process died has still used up its one authorisation. See `ProjectStore.claimGrant`.
+ */
 export const GrantStatus = z.enum(["active", "consumed", "revoked", "expired"]);
 export type GrantStatus = z.infer<typeof GrantStatus>;
+
+/**
+ * ABSOLUTE MUTATION BOUNDS.
+ *
+ * A human approving a plan is authorising a bounded edit, not a rewrite. These
+ * are the most any grant may ever carry, whatever the caller asks for; raising
+ * them is an edit to this file, reviewable on its own.
+ *
+ * Chosen for Phase 4A, where no coding agent exists yet and every write is a
+ * deliberate, in-scope file edit. They are intentionally well below what a
+ * repository-wide operation would need.
+ */
+export const MAX_GRANT_WRITES = 1_000;
+export const MAX_GRANT_WRITE_BYTES = 4 * 1024 * 1024;
 
 export const ImplementationGrant = z.object({
   grantId: z.string().min(1),
@@ -63,10 +89,20 @@ export const ImplementationGrant = z.object({
   notBefore: z.string().datetime(),
   /** Not usable after this instant. A grant always expires. */
   expiresAt: z.string().datetime(),
-  /** Hard ceiling on mutations, so a looping agent cannot rewrite a repository. */
-  maxWrites: z.number().int().positive().default(200),
-  /** Hard ceiling on the size of any single written file. */
-  maxWriteBytes: z.number().int().positive().default(1024 * 1024),
+  /**
+   * Mutation budget, so a looping agent cannot rewrite a repository.
+   *
+   * `.max()` is the point: without it a caller could ask for `Number.MAX_SAFE_INTEGER`
+   * and the "ceiling" would be decoration. Enforcing it in the SCHEMA rather than
+   * only in `issueGrant` means a hand-edited grant file above the limit fails to
+   * parse - it cannot be smuggled in through the store either.
+   *
+   * `.int()` additionally rejects `Infinity` and `NaN`, since neither is an
+   * integer, so no floating-point value can slip past the comparison.
+   */
+  maxWrites: z.number().int().positive().max(MAX_GRANT_WRITES).default(200),
+  /** Ceiling on the size of any single written file. Same reasoning. */
+  maxWriteBytes: z.number().int().positive().max(MAX_GRANT_WRITE_BYTES).default(1024 * 1024),
 
   status: GrantStatus.default("active"),
   /** SHA-256 over the binding fields. Detects edits to the stored record. */
@@ -166,8 +202,11 @@ export function issueGrant(input: IssueGrantInput): ImplementationGrant {
     capabilities: [...new Set(input.capabilities)].sort(),
     notBefore: now.toISOString(),
     expiresAt: new Date(now.getTime() + lifetime).toISOString(),
-    maxWrites: input.maxWrites ?? 200,
-    maxWriteBytes: input.maxWriteBytes ?? 1024 * 1024,
+    // Clamped, not rejected - consistent with `resolveLimits` in
+    // security/limits.ts. Clamping can only ever produce a NARROWER grant, so
+    // a mistaken caller gets less authority than it asked for, never more.
+    maxWrites: Math.min(input.maxWrites ?? 200, MAX_GRANT_WRITES),
+    maxWriteBytes: Math.min(input.maxWriteBytes ?? 1024 * 1024, MAX_GRANT_WRITE_BYTES),
     status: "active" as const,
   };
 
@@ -200,6 +239,34 @@ export interface GrantCheckContext {
   projectId: string;
   runId: string;
   now?: Date;
+}
+
+/**
+ * Does the PRESENTED grant describe the same authorisation as the ISSUED one?
+ *
+ * Compares fingerprints rather than the whole object, because the fingerprint
+ * covers exactly the binding fields - and `status` is deliberately NOT one of
+ * them. A deep-equality check breaks the moment the stored grant is marked
+ * `consumed`, reporting "tampered" for what is really a reuse attempt and
+ * hiding the actual reason from whoever has to read the denial.
+ */
+export function assertSameGrant(
+  presented: ImplementationGrant,
+  stored: ImplementationGrant,
+): void {
+  if (fingerprintGrant(presented) !== presented.fingerprint) {
+    throw new GrantDenied(
+      "tampered",
+      `Grant ${presented.grantId} does not match its own fingerprint; it has been modified.`,
+    );
+  }
+  if (presented.fingerprint !== stored.fingerprint) {
+    throw new GrantDenied(
+      "tampered",
+      `Grant ${presented.grantId} does not match the issued record; the copy supplied ` +
+        "to the runner authorises something different from what was approved.",
+    );
+  }
 }
 
 /**

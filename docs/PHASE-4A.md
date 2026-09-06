@@ -84,14 +84,83 @@ allowedScope  inherited from the plan the human approved, including their edits
 capabilities  bounded repository read/write/delete only
 notBefore     \
 expiresAt      |  bounded validity - 15 min default, 60 min hard maximum
-maxWrites      |  mutation budget
-maxWriteBytes /   per-file size ceiling
+maxWrites      |  mutation budget    - hard maximum 1,000   (default 200)
+maxWriteBytes /   per-file ceiling    - hard maximum 4 MB    (default 1 MB)
 fingerprint   SHA-256 over all of the above
 ```
 
 **Validation happens at capability use time, not once at the start.** Every
 `writeFile` re-checks expiry, binding and integrity, so a long-running agent
 cannot be validated while fresh and then write indefinitely.
+
+### A grant is SINGLE-USE
+
+> **An implementation grant is single-use. Once an implementation attempt has
+> claimed the grant, it cannot be reused — including after failure, cancellation
+> or process interruption.**
+
+```
+HUMAN APPROVAL → ACTIVE → [one implementation attempt claims it] → CONSUMED
+                                                                      ↓
+                                                            permanently unusable
+```
+
+`consumed` is terminal and irreversible, and it is reached by **claiming** the
+grant, not by finishing successfully. A run that failed, was cancelled, or whose
+process died has still spent its one authorisation. A second attempt is refused
+with the structured reason `consumed`; no replacement grant is minted silently,
+so continuing requires a new human approval.
+
+#### The commit point
+
+Consumption is committed by `ProjectStore.claimGrant()`, which creates
+`grants/<grantId>.claim` with `open(..., "wx")` — an **exclusive create**, a
+single atomic syscall on both POSIX and Windows. Exactly one caller can succeed;
+every other gets `EEXIST` and is refused.
+
+The status field in the grant JSON is updated immediately afterwards, but the
+**marker is authoritative**, not the JSON. Those are two operations and a process
+can die between them; if the JSON decided, that crash would leave a claimed grant
+reading `active`. `getGrant()` therefore reports `consumed` whenever the marker
+exists, so the durable one-shot property rests on one indivisible fact.
+
+#### Where it happens, and why there
+
+```
+validate grant → acquire project lock → CLAIM GRANT → run agent → …
+```
+
+**Before the agent, deliberately.** Claiming afterwards would leave a window in
+which a crashed run's grant still read `active`, letting a second process pick it
+up and start writing over whatever the first had already done — with no baseline
+describing the state it was starting from.
+
+The cost is real and is accepted: **a crashed attempt burns a human approval**
+and a new one is needed. That is the right direction to fail — a human
+re-approves, rather than a machine silently re-entering a repository in an
+unknown state.
+
+**After the lock**, so ordinary lock contention does *not* burn a grant. The
+claim is still atomic on its own and does not depend on the lock: a read-only
+grant takes no lock and is single-use all the same. The grant's one-shot
+lifecycle and the project lock are independent controls.
+
+#### Concurrency
+
+Two callers presenting the same active grant cannot both proceed. The exclusive
+create decides, and there is exactly one winner; the loser is refused, not
+queued. Tested directly (twelve simultaneous claims → one success) and
+end-to-end (two concurrent runs → exactly one implementation, exactly one file
+written).
+
+#### What is not claimed
+
+The project store is a directory of files, not a transactional database. What is
+guaranteed is that the **claim** is atomic, and that a claimed grant never
+becomes usable again. The subsequent status write and the activity record are
+ordinary file writes; if one fails the grant remains consumed, which is the
+conservative direction. No transactional guarantee is claimed across the store as
+a whole.
 
 ### What "tamper-evident" honestly means
 
@@ -104,6 +173,20 @@ after widening* — internal consistency is not enough.
 **Limitation:** a process that can already write to the orchestrator's project
 store could rewrite both the grant and its fingerprint. Signing would need key
 management this phase does not have.
+
+### The mutation budget has a real ceiling
+
+`maxWrites` and `maxWriteBytes` are bounded by `MAX_GRANT_WRITES` (1,000) and
+`MAX_GRANT_WRITE_BYTES` (4 MB). A request above either is **clamped**, matching
+how `resolveLimits` behaves elsewhere — clamping can only ever produce a narrower
+grant, so a mistaken caller gets less authority than it asked for, never more.
+
+The ceiling is enforced in the **Zod schema**, not only in `issueGrant`. Without
+that, a hand-edited grant file could carry any number and the "ceiling" would be
+decoration; with it, such a file fails to parse and cannot be smuggled in through
+the store. `.int()` additionally rejects `Infinity`, `-Infinity`, `NaN` and
+fractional values, so no floating-point value slips past the comparison. Defaults
+are unchanged.
 
 ## 4. The agent cannot expand its permissions
 
@@ -205,6 +288,12 @@ a human's edit.
 
 The **activity journal** is the third kind: what the orchestrator did and
 refused, recorded as it happened, in `projects/<id>/activity/<run>.jsonl`.
+
+Grant consumption is part of it: `grant_consumed` records the claim (grant id,
+timestamp, claiming pid and host — metadata only), and `grant_reuse_denied`
+records every refused reuse attempt with its structured reason. Both are written
+by the orchestrator at the moment of the decision; an agent has no way to forge,
+suppress, or delete either.
 
 It is written **by the orchestrator, from inside the capability check** — never
 by the agent. An agent cannot append to it, suppress an entry, or describe its own
@@ -339,3 +428,11 @@ exactly what the fake receives: a bounded session and nothing else.
    end of its current step. It cannot exceed its grant while doing so, but it is
    not pre-empted.
 8. **No rollback.** Stated throughout rather than implied away.
+9. **A crashed attempt burns its grant.** Deliberate (see §3): the grant is
+   claimed before the agent runs, so an interrupted implementation cannot be
+   retried without a fresh human approval. The alternative — a reusable grant
+   after a crash — would let a second process re-enter a repository whose state
+   nobody has described.
+10. **The store is files, not a transaction log.** The claim is atomic; the
+    status write and journal append that follow it are not part of that atom. A
+    failure there leaves the grant consumed, never revived.

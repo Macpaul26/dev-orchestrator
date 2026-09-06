@@ -9,7 +9,8 @@ import {
   ImplementationSession, CancellationToken, ImplementationCancelled,
 } from "./session.js";
 import {
-  type ImplementationGrant, assertGrantUsable, grantIsMutating, GrantDenied,
+  type ImplementationGrant, assertGrantUsable, assertSameGrant,
+  grantIsMutating, GrantDenied,
 } from "../domain/grant.js";
 import {
   ImplementationRun, AgentReport,
@@ -41,6 +42,26 @@ import type { ProjectStore } from "../projects/projectStore.js";
  * not make the run succeed, and an agent reporting nothing does not make the run
  * clean. The status comes from what the ORCHESTRATOR observed itself doing, and
  * what actually changed is settled afterwards by Phase 3 repository inspection.
+ *
+ * ---------------------------------------------------------------------------
+ * THE GRANT IS CLAIMED BEFORE THE WORK, AND ONLY ONCE
+ * ---------------------------------------------------------------------------
+ * A grant authorises ONE attempt. It is claimed - atomically, durably - after
+ * the project lock is held and BEFORE the agent is invoked, and it is never
+ * released. Success, failure, cancellation and process death all leave it
+ * consumed, because all four are attempts that used up the authorisation.
+ *
+ * Claiming before the agent runs is deliberate. Claiming afterwards would leave
+ * a window in which a crashed run's grant still read `active`, and a second
+ * process could pick it up and start writing over whatever the first one had
+ * already done - with no baseline that describes the state it is starting from.
+ * The cost is that a crashed attempt burns a human approval and needs a new one.
+ * That is the right direction to fail: a human re-approves, rather than a
+ * machine silently re-entering a repository in an unknown state.
+ *
+ * The claim happens AFTER the lock, so ordinary lock contention does not burn a
+ * grant. The claim is still atomic on its own and does not depend on the lock -
+ * a read-only grant takes no lock and is still single-use.
  *
  * ---------------------------------------------------------------------------
  * THE RECORD IS WRITTEN BEFORE THE WORK
@@ -123,16 +144,29 @@ export class ControlledImplementationRunner {
         `Grant ${grant.grantId} was never issued for project "${grant.projectId}".`,
       );
     }
-    if (JSON.stringify(stored) !== JSON.stringify(grant)) {
-      throw new GrantDenied(
-        "tampered",
-        `Grant ${grant.grantId} does not match the issued record; the copy supplied ` +
-          "to the runner has been modified.",
-      );
+    // Binding is compared by fingerprint, and LIFECYCLE is read only from the
+    // stored record - so a reuse attempt is reported as `consumed`, which is
+    // what happened, rather than as `tampered`, which is not.
+    assertSameGrant(grant, stored);
+
+    const denyReuse = (error: unknown): never => {
+      if (error instanceof GrantDenied) {
+        journal.append({
+          type: "grant_reuse_denied", runId: stored.runId, projectId: stored.projectId,
+          grantId: stored.grantId, correlationId, at: this.clock().toISOString(),
+          reason: error.reason, detail: error.message,
+        });
+      }
+      throw error;
+    };
+
+    try {
+      assertGrantUsable(stored, {
+        projectId: stored.projectId, runId: stored.runId, now: this.clock(),
+      });
+    } catch (error) {
+      return denyReuse(error);
     }
-    assertGrantUsable(stored, {
-      projectId: stored.projectId, runId: stored.runId, now: this.clock(),
-    });
 
     const project = store.requireProject(stored.projectId);
 
@@ -188,9 +222,42 @@ export class ControlledImplementationRunner {
       }
     }
 
+    // ---- 3b. CLAIM THE GRANT - atomic, durable, irreversible --------------
+    // One approval, one attempt. Everything past this point runs on a grant
+    // that can never authorise anything again.
+    const consumed = store.claimGrant(stored.projectId, stored.grantId);
+    if (!consumed) {
+      // Another attempt won the race, or this grant was already used.
+      const denial = new GrantDenied(
+        "consumed",
+        `Grant ${stored.grantId} has already been claimed by an implementation ` +
+          "attempt and cannot be used again.",
+      );
+      journal.append({
+        type: "grant_reuse_denied", runId: stored.runId, projectId: stored.projectId,
+        grantId: stored.grantId, correlationId, at: this.clock().toISOString(),
+        reason: denial.reason, detail: denial.message,
+      });
+      if (holdsLock) lock.release(stored.runId);
+      store.saveImplementation({
+        ...record, status: "failed", endedAt: this.clock().toISOString(),
+        failureCategory: "denied",
+        failureDetail: "the implementation grant had already been consumed",
+      });
+      throw denial;
+    }
+
+    journal.append({
+      type: "grant_consumed", runId: stored.runId, projectId: stored.projectId,
+      grantId: stored.grantId, correlationId, at: this.clock().toISOString(),
+      claimedByPid: process.pid, claimedByHost: os.hostname(),
+    });
+
     // ---- 4. the bounded session ------------------------------------------
     const boundary = FsBoundary.create(project.workingDir);
     const session = new ImplementationSession(
+      // Bounds come from the ISSUED record. `consumed` differs from `stored`
+      // only in `status`, which is not part of what the grant permits.
       stored,
       new SafeFs(boundary, this.limits),
       new SafeWriteFs(boundary, this.limits),
