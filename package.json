@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "tools": "node dist/cli/index.js tools",
     "test:watch": "vitest",
     "dev": "tsx src/cli/index.ts"
   },

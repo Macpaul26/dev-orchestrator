@@ -4,14 +4,17 @@ import type { InspectionLimits } from "../../security/limits.js";
 /**
  * THE GIT READ-ONLY BOUNDARY
  *
- * This module is the ONLY place in the orchestrator that starts a process. Four
- * properties make that acceptable, and all four are enforced here rather than
+ * This module is the ONLY place in the orchestrator that starts a process. Five
+ * properties make that acceptable, and all five are enforced here rather than
  * trusted to callers:
  *
  *   1. NO SHELL. `spawnSync` with `shell: false` and an argv array. There is no
  *      string that gets parsed by cmd.exe or /bin/sh, so quoting, `;`, `&&`,
  *      backticks and globs have no meaning. A malicious filename is an
  *      argument, not a command.
+ *
+ *      THIS IS NOT SUFFICIENT ON ITS OWN. `shell: false` controls how WE launch
+ *      git; it says nothing about what git then launches. See property 5.
  *
  *   2. NO ARBITRARY COMMAND. The executable is hard-coded to `git`. There is no
  *      `exec(command)` export and no way to pass one - deliberately. The
@@ -27,6 +30,25 @@ import type { InspectionLimits } from "../../security/limits.js";
  *      An `ANTHROPIC_API_KEY` or `GITHUB_TOKEN` in the parent process is not
  *      visible to git, and neither are `GIT_DIR` / `GIT_WORK_TREE`, which could
  *      otherwise redirect the command outside the boundary.
+ *
+ *   5. GIT ITSELF MAY NOT BE TURNED INTO A LAUNCHER. This is the property the
+ *      first four do NOT provide.
+ *
+ *      Git will happily execute programs named in configuration. A repository
+ *      we are merely INSPECTING controls its own `.git/config` and
+ *      `.gitattributes`, so cloning a hostile repository and running
+ *      `git diff` over it is remote code execution:
+ *
+ *          .git/config      [diff "x"] command = <anything>
+ *                           [diff "y"] textconv = <anything>
+ *          .gitattributes   *.ts diff=x
+ *
+ *      `GIT_CONFIG_NOSYSTEM=1` does NOT stop this - it suppresses only the
+ *      SYSTEM config, and the dangerous settings are repository-local. This was
+ *      confirmed experimentally, not assumed. The protection has to be attached
+ *      to the invocation: `--no-ext-diff` and `--no-textconv` on every diff, and
+ *      fixed `-c` overrides for the settings that execute programs outside the
+ *      diff machinery. See SUBCOMMAND_SAFETY_FLAGS and CONFIG_OVERRIDES below.
  *
  * Arguments are always constructed by trusted adapter code. Nothing model-
  * generated reaches this file; the validation below exists so that stays true
@@ -77,6 +99,49 @@ const FORBIDDEN_ARG_PREFIXES = [
   "--receive-pack",
   "-C",
   "-c",
+];
+
+/**
+ * Flags forced onto specific subcommands, whatever the caller asked for.
+ *
+ * `--no-ext-diff`  refuses `diff.external` and any `diff.<driver>.command`
+ *                  selected through `.gitattributes`.
+ * `--no-textconv`  refuses `diff.<driver>.textconv`.
+ *
+ * Applied to `log` as well as `diff`: `git log` accepts the whole diff option
+ * set, so a later caller adding `-p` must not silently re-open the hole.
+ *
+ * These sit BETWEEN the subcommand and the caller's arguments, so a caller
+ * cannot position an argument ahead of them.
+ */
+const SUBCOMMAND_SAFETY_FLAGS: Record<string, readonly string[]> = {
+  diff: ["--no-ext-diff", "--no-textconv"],
+  log: ["--no-ext-diff", "--no-textconv"],
+};
+
+/**
+ * Configuration this process pins, overriding whatever the repository says.
+ *
+ * `-c` is FORBIDDEN in caller-supplied arguments (see FORBIDDEN_ARG_PREFIXES)
+ * precisely so that this position stays trustworthy: these values are hard-coded
+ * here, in trusted adapter code, and are the only `-c` git ever receives.
+ *
+ * `core.fsmonitor` names a program git runs during `status` to discover changed
+ * files - a repository-controlled execution path that has nothing to do with
+ * diff, and that `--no-ext-diff` therefore does not cover.
+ * `diff.external` is belt-and-braces alongside `--no-ext-diff`.
+ */
+const CONFIG_OVERRIDES: readonly string[] = [
+  "-c", "core.fsmonitor=",
+  "-c", "diff.external=",
+];
+
+/** Flags applied to every invocation, before the subcommand. */
+const GLOBAL_FLAGS: readonly string[] = [
+  "--no-pager",
+  // Stops `status` refreshing the on-disk index, so inspection leaves no trace.
+  "--no-optional-locks",
+  ...CONFIG_OVERRIDES,
 ];
 
 export class GitCommandNotPermitted extends Error {
@@ -165,7 +230,13 @@ export function runGit(
 
   const result = spawnSync(
     "git",
-    ["--no-pager", "--no-optional-locks", subcommand, ...args],
+    [
+      ...GLOBAL_FLAGS,
+      subcommand,
+      // Forced before the caller's arguments so they cannot be pre-empted.
+      ...(SUBCOMMAND_SAFETY_FLAGS[subcommand] ?? []),
+      ...args,
+    ],
     {
       cwd,
       env: safeEnv(),
@@ -203,6 +274,23 @@ export function runGit(
     timedOut: false,
   };
 }
+
+/**
+ * Exported for tests: the exact argv this module would build.
+ *
+ * Lets a test assert the safety flags are present without spawning anything.
+ */
+export function gitArgvFor(subcommand: string, args: readonly string[]): string[] {
+  return [
+    ...GLOBAL_FLAGS,
+    subcommand,
+    ...(SUBCOMMAND_SAFETY_FLAGS[subcommand] ?? []),
+    ...args,
+  ];
+}
+
+export const GIT_SAFETY_FLAGS = SUBCOMMAND_SAFETY_FLAGS;
+export const GIT_CONFIG_OVERRIDES = CONFIG_OVERRIDES;
 
 /** Exported for tests: the exact surface the inspector is allowed to use. */
 export const GIT_READ_ONLY_SUBCOMMANDS: readonly string[] = [...ALLOWED_SUBCOMMANDS].sort();

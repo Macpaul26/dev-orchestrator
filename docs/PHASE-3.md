@@ -112,11 +112,14 @@ A link that stays inside the root resolves normally and is reported at its
 ## 2. Git is read-only
 
 `src/adapters/repository/gitExec.ts` is the **only** module in the orchestrator
-that starts a process. Four properties make that acceptable:
+that starts a process. Five properties make that acceptable:
 
 1. **No shell.** `spawnSync` with `shell: false` and an argv array. No string is
    ever parsed by `cmd.exe` or `/bin/sh`, so `;`, `&&`, backticks and globs have
    no meaning. A malicious filename is an argument, not a command.
+
+   **This is not sufficient on its own.** `shell: false` governs how *we* launch
+   git; it says nothing about what git then launches. See property 5.
 2. **No arbitrary command.** The executable is hard-coded to `git`. There is no
    `exec(command)` export. The subcommand must be on the allowlist:
    `rev-parse`, `status`, `diff`, `log`, `ls-files`, `cat-file`, `rev-list`,
@@ -129,7 +132,10 @@ that starts a process. Four properties make that acceptable:
 4. **No inherited secrets.** The child environment is **built**, not inherited.
    An `ANTHROPIC_API_KEY` or `GITHUB_TOKEN` in the parent is invisible to git,
    and so are `GIT_DIR` / `GIT_WORK_TREE`, which could otherwise redirect the
-   command outside the boundary.
+   command outside the boundary. `GIT_EXTERNAL_DIFF` cannot reach the child
+   either, for the same reason: the environment is a fixed passthrough list.
+5. **Git itself may not be turned into a launcher.** See below — this is the
+   property the first four do *not* provide.
 
 `branch` and `config` are on the **denied** list even though they can read:
 `branch -D` deletes and `config --global` writes. Branch information comes from
@@ -137,7 +143,70 @@ that starts a process. Four properties make that acceptable:
 
 Arguments that could redirect git (`--git-dir=`, `--work-tree=`, `--exec-path=`,
 `-C`, `-c`, `--upload-pack=`, `--receive-pack=`) are rejected wherever they
-appear.
+appear in caller-supplied arguments.
+
+### 2a. Repository configuration must not become code execution
+
+This is the part `shell: false` does **not** buy, and it is worth stating
+precisely rather than waving at.
+
+Git executes programs named in its own configuration. A repository the
+orchestrator merely *inspects* owns its `.git/config` and `.gitattributes`, so
+running `git diff` over a hostile checkout is remote code execution:
+
+```
+.git/config      [diff "x"] command  = <anything>     run by git diff
+                 [diff "y"] textconv = <anything>     run by git diff
+                 [diff]     external = <anything>     run by git diff
+                 [core]     fsmonitor = <anything>    run by git status
+.gitattributes   *.ts diff=x
+```
+
+**`GIT_CONFIG_NOSYSTEM=1` does not prevent any of this.** It suppresses the
+*system* configuration; every setting above is repository-local. This was
+confirmed by experiment against real git, not assumed — the attack fires with
+`GIT_CONFIG_NOSYSTEM=1` set.
+
+Neither the subcommand allowlist nor the absence of inherited credentials helps:
+`diff` is a legitimately allowlisted read-only subcommand, and the hostile
+program is named by the repository, not by the environment.
+
+The protection is therefore attached to the invocation itself:
+
+| Mechanism | Where | Stops |
+| --- | --- | --- |
+| `--no-ext-diff` | forced onto `diff` and `log` | `diff.external` and any `diff.<driver>.command` selected via `.gitattributes` |
+| `--no-textconv` | forced onto `diff` and `log` | `diff.<driver>.textconv` |
+| `-c diff.external=` | every invocation | belt-and-braces with `--no-ext-diff` |
+| `-c core.fsmonitor=` | every invocation | the program git runs during `status`, which the diff flags do not cover |
+
+The forced flags are inserted **between the subcommand and the caller's
+arguments**, so no caller can position an argument ahead of them. `log` gets them
+as well as `diff`, because `git log` accepts the whole diff option set and a
+later caller adding `-p` must not silently reopen the hole.
+
+`-c` remains **forbidden in caller-supplied arguments**, and that is exactly what
+keeps the `-c` position trustworthy: the overrides above are hard-coded in
+trusted adapter code and are the only `-c` git ever receives.
+
+`tests/gitHardening.test.ts` proves each of these against a real repository whose
+local configuration tries to run a marker program. **Every one of those tests
+carries a positive control**: it first asserts the attack *does* fire against
+plain git, then deletes the marker, then asserts it does not fire through the
+inspector — so a broken fixture fails loudly instead of passing vacuously.
+
+#### Known residual: content filter drivers
+
+`filter.<name>.clean` is run by `git status` when it must read a file's content
+to decide whether it changed. Git offers no command-line switch to disable it,
+and it cannot be neutralised with a fixed `-c` because the driver names are
+chosen by the repository. It is therefore **not** blocked today.
+
+The exposure is narrower than the diff drivers — git consults the index's cached
+stat information first and only applies the filter when size or mtime already
+differ — but it is real, and it is recorded here rather than left implied by a
+broader claim than the code supports. Inspecting a genuinely untrusted
+repository should happen in a sandbox regardless.
 
 ---
 

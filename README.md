@@ -74,6 +74,7 @@ node dist/cli/index.js resume --run <runId> --decision approve
 | Path containment | Lexical **and** physical - symlinks and Windows junctions resolved before the check |
 | Repository writes | None. No write method exists on any interface. |
 | Git | Read-only allowlist; every mutating subcommand rejected |
+| Repository-controlled git config | `--no-ext-diff` / `--no-textconv` forced onto every diff, plus pinned `-c` overrides — a hostile repo cannot make inspection run its programs |
 | Shell | None. `spawnSync` with `shell: false` and an argv array; `git` is the only executable. |
 | Secrets in the child environment | None. The environment is built, not inherited. |
 | Secrets in state / checkpoints / history | Sensitive files are reported by name; contents are never captured. |
