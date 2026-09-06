@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { InspectionLimits } from "../security/limits.js";
+import { FileFingerprint } from "./attribution.js";
 
 /**
  * REPOSITORY EVIDENCE
@@ -135,6 +136,20 @@ export const RepositoryEvidence = z.object({
 
   diff: DiffEvidence.nullable().default(null),
   diffStat: z.string().nullable().default(null),
+
+  /**
+   * Content fingerprints for every path dirty at the time of this snapshot.
+   *
+   * This is what makes attribution possible on a repository that was ALREADY
+   * dirty. Comparing filenames between two snapshots cannot tell you that a
+   * file which was modified before is now modified DIFFERENTLY; comparing
+   * fingerprints can. See domain/attribution.ts.
+   *
+   * Sensitive files appear here with `contentHash: null` - their identity is
+   * tracked by size, mtime and git status, never by hashing their bytes.
+   */
+  fingerprints: z.array(FileFingerprint).default([]),
+  fingerprintsTruncated: z.boolean().default(false),
 
   recentCommits: z.array(GitCommit).default([]),
 

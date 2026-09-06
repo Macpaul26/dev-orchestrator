@@ -1,6 +1,8 @@
 import type {
   InspectionOutcome, FileContent, DirectoryListing, FileMetadata, GitCommit,
+  DiffEvidence,
 } from "./repository.js";
+import type { FileFingerprint } from "./attribution.js";
 
 /**
  * THE REPOSITORY INSPECTION INTERFACE
@@ -35,4 +37,26 @@ export interface RepositoryInspector {
   commitExists(sha: string): Promise<boolean>;
   /** Commits reachable from HEAD but not from `baseSha`. */
   commitsSince(baseSha: string): Promise<GitCommit[]>;
+
+  /**
+   * Fingerprint specific paths, whether or not they still exist.
+   *
+   * Needed at verification time for paths the BASELINE knew about that are no
+   * longer dirty - a file that was deleted, committed, or reverted leaves the
+   * status listing entirely, and only re-fingerprinting it can tell those apart
+   * from "nothing happened".
+   */
+  fingerprintPaths(paths: readonly string[]): Promise<FileFingerprint[]>;
+
+  /** Paths touched by commits reachable from HEAD but not from `baseSha`. */
+  changedFilesSince(baseSha: string): Promise<string[]>;
+
+  /**
+   * A diff restricted to specific paths, optionally against an older commit.
+   *
+   * This is how `observedDiff` is kept honest: it is generated for the
+   * ATTRIBUTABLE paths only, so a repository full of someone else's uncommitted
+   * work cannot be presented as the output of this run.
+   */
+  diffFor(paths: readonly string[], baseSha?: string | null): Promise<DiffEvidence>;
 }

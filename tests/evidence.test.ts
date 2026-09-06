@@ -179,7 +179,11 @@ describe("baseline attribution", () => {
     });
     expect(result.evidence.baselineCaptured).toBe(false);
     expect(result.evidence.driftBasis).toBe("all_changes");
-    expect(result.evidence.notes.some((n) => n.includes("no pre-implementation baseline"))).toBe(true);
+    // The absence of a baseline must be disclosed, and the overstatement named.
+    const disclosure = result.evidence.notes.join(" ");
+    expect(disclosure).toContain("no baseline");
+    expect(disclosure.toLowerCase()).toContain("overstate");
+    expect(result.evidence.attribution.baselineAvailable).toBe(false);
     // Without a baseline it errs toward reporting, not toward silence.
     expect(result.evidence.scope.drift).toContain("whatever.ts");
   });

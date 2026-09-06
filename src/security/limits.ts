@@ -25,6 +25,8 @@ export const CEILINGS = {
   maxListedFiles: 20_000,
   maxDepth: 32,
   maxCommits: 200,
+  maxFingerprintBytes: 128 * 1024 * 1024,
+  maxFingerprintedFiles: 20_000,
   gitTimeoutMs: 60_000,
   gitMaxBufferBytes: 8 * 1024 * 1024,
 } as const;
@@ -42,6 +44,17 @@ export const InspectionLimits = z.object({
   maxDepth: z.number().int().positive().default(8),
   /** Commits returned by history inspection. */
   maxCommits: z.number().int().positive().default(50),
+  /**
+   * Largest file the inspector will HASH for a change fingerprint.
+   *
+   * Separate from `maxFileBytes` because the two do different things: reading a
+   * file loads it into memory and into evidence, whereas hashing streams it in
+   * fixed-size chunks and keeps only 32 bytes. So this can be far larger
+   * safely - it costs time, not memory, and no content is retained.
+   */
+  maxFingerprintBytes: z.number().int().positive().default(16 * 1024 * 1024),
+  /** Cap on how many files one attribution pass will fingerprint. */
+  maxFingerprintedFiles: z.number().int().positive().default(2_000),
   /** Wall-clock budget for one git invocation. */
   gitTimeoutMs: z.number().int().positive().default(15_000),
   /** Hard cap on bytes captured from one git invocation. */

@@ -124,6 +124,58 @@ describe("inspect against a real repository", () => {
     expect(review.scopeDrift).toContain("outside-scope.ts");
   });
 
+  it("attributes a further change to a file that was ALREADY dirty at start", async () => {
+    // The end-to-end form of the attribution regression: the working tree is
+    // dirty before the run, and the run edits the very same file again.
+    fs.writeFileSync(path.join(repo, "README.md"), "# fixture\nhuman WIP\n");
+
+    const started = await newRunner().start("real", "Edit the readme further");
+    // Baseline is captured by `inspect`, which has now run.
+    fs.writeFileSync(path.join(repo, "README.md"), "# fixture\nhuman WIP\nrun edit\n");
+
+    const after = await newRunner().resume(
+      started.run.id,
+      HumanDecision.parse({
+        approvalId: started.pendingApproval!.approvalId,
+        kind: "edit", decidedBy: "owner", decidedAt: iso(),
+        editedPlan: { ...started.pendingApproval!.proposedPlan!, allowedScope: ["src/"] },
+      }),
+    );
+
+    const verification = after.pendingApproval!.payload["verification"] as Record<string, unknown>;
+    const attribution = verification["attribution"] as Record<string, unknown>;
+
+    // The run's second edit is attributed to the run, not written off.
+    expect(attribution["modifiedDuringRun"]).toContain("README.md");
+    expect(attribution["preExisting"]).toBe(0);
+    // And because README.md is outside the approved scope, it is drift.
+    expect(verification["scopeDrift"]).toContain("README.md");
+    // A dirty tree does not cost us independent verification.
+    expect(verification["verifiedIndependently"]).toBe(true);
+    expect(verification["observedDiffBasis"]).toBe("attributable");
+  });
+
+  it("does not attribute a pre-existing change the run never touched", async () => {
+    fs.writeFileSync(path.join(repo, "README.md"), "# fixture\nsomeone else's WIP\n");
+
+    const started = await newRunner().start("real", "Leave the readme alone");
+    const after = await newRunner().resume(
+      started.run.id,
+      HumanDecision.parse({
+        approvalId: started.pendingApproval!.approvalId,
+        kind: "edit", decidedBy: "owner", decidedAt: iso(),
+        editedPlan: { ...started.pendingApproval!.proposedPlan!, allowedScope: ["src/"] },
+      }),
+    );
+
+    const verification = after.pendingApproval!.payload["verification"] as Record<string, unknown>;
+    const attribution = verification["attribution"] as Record<string, unknown>;
+    expect(attribution["preExisting"]).toBe(1);
+    expect(attribution["modifiedDuringRun"]).toEqual([]);
+    expect(verification["scopeDrift"]).toEqual([]);
+    expect(verification["verifiedIndependently"]).toBe(true);
+  });
+
   it("does not modify the repository over a full run", async () => {
     const before = snapshotTree(repo);
     const started = await newRunner().start("real", "Look, do not touch");

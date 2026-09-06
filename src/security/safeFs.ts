@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { toPosix, type FsBoundary } from "./fsBoundary.js";
 import { classifySensitivity } from "./sensitive.js";
 import { type InspectionLimits, DEFAULT_LIMITS } from "./limits.js";
+import { FileFingerprint, type FileFingerprint as TFileFingerprint } from "../domain/attribution.js";
 import {
   FileMetadata, FileContent, DirectoryListing,
   type FileMetadata as TFileMetadata,
@@ -140,6 +142,80 @@ export class SafeFs {
     });
   }
 
+  /**
+   * A content fingerprint for one path, for CHANGE ATTRIBUTION.
+   *
+   * The point is to answer "is this the same file it was five minutes ago?"
+   * without keeping the file. Two properties make that safe:
+   *
+   *   1. The hash is computed by STREAMING fixed-size chunks, so memory stays
+   *      constant no matter how large the file is, and the bytes are discarded
+   *      immediately. Only 32 bytes of digest survive.
+   *
+   *   2. A SENSITIVE file is NEVER hashed. A digest of a low-entropy secret,
+   *      stored permanently in an audit log, is a real disclosure risk - it can
+   *      be attacked by guessing. So sensitive files fall back to size, mtime
+   *      and git status, and the fingerprint records `basis: "metadata_only"`
+   *      so every downstream verdict carries that caveat with it.
+   *
+   * This is why attribution never requires relaxing the sensitive-file rule.
+   */
+  fingerprint(relativePath: string): TFileFingerprint {
+    const { absolute, relative } = this.boundary.resolve(relativePath);
+
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(absolute);
+    } catch {
+      return FileFingerprint.parse({ path: relative, present: false, kind: "absent" });
+    }
+
+    const base = {
+      path: relative,
+      present: true,
+      kind: kindOf(stats),
+      size: stats.isFile() ? stats.size : 0,
+      mtimeMs: Math.round(stats.mtimeMs),
+    };
+
+    if (!stats.isFile()) {
+      return FileFingerprint.parse({
+        ...base, contentHash: null, basis: "metadata_only",
+        withheldReason: "not a regular file",
+      });
+    }
+
+    const verdict = classifySensitivity(relative);
+    if (verdict.sensitive) {
+      return FileFingerprint.parse({
+        ...base, contentHash: null, basis: "metadata_only",
+        withheldReason: `sensitive: ${verdict.detail ?? "policy"}`,
+      });
+    }
+
+    if (stats.size > this.limits.maxFingerprintBytes) {
+      return FileFingerprint.parse({
+        ...base, contentHash: null, basis: "metadata_only",
+        withheldReason: `larger than the ${this.limits.maxFingerprintBytes}-byte hash limit`,
+      });
+    }
+
+    try {
+      const digests = hashFile(absolute, stats.size);
+      return FileFingerprint.parse({
+        ...base,
+        contentHash: digests.sha256,
+        blobSha: digests.gitBlobSha,
+        basis: "content_hash",
+      });
+    } catch (error) {
+      return FileFingerprint.parse({
+        ...base, contentHash: null, basis: "metadata_only",
+        withheldReason: `unreadable (${(error as NodeJS.ErrnoException).code ?? "unknown"})`,
+      });
+    }
+  }
+
   /** One directory level, bounded by `maxDirectoryEntries`. */
   listDirectory(relativePath = "."): TDirectoryListing {
     const { absolute, relative } = this.boundary.resolve(relativePath);
@@ -217,6 +293,43 @@ function readPrefix(absolute: string, limit: number): Buffer {
   } finally {
     fs.closeSync(handle);
   }
+}
+
+/**
+ * Digest a file in one streamed pass, producing two identifiers.
+ *
+ * Deliberately chunked rather than `readFileSync`: fingerprinting exists to
+ * detect change, not to read the file, so it must not be possible for it to
+ * pull a large file into memory - or into evidence.
+ *
+ *   sha256       change detection. Preferred, because an implementation agent
+ *                is not a trusted party and SHA-1 is collision-attackable.
+ *   gitBlobSha   `sha1("blob <bytes>\0" + contents)`, exactly what git stores.
+ *                Computed so a file that APPEARED can be matched against one
+ *                that VANISHED using git's own id for the vanished content -
+ *                identifying a rename without reading anything back out of git.
+ */
+function hashFile(absolute: string, size: number): { sha256: string; gitBlobSha: string } {
+  const sha256 = crypto.createHash("sha256");
+  const blob = crypto.createHash("sha1");
+  blob.update(`blob ${size}\0`);
+
+  const buffer = Buffer.alloc(64 * 1024);
+  const handle = fs.openSync(absolute, "r");
+  try {
+    let position = 0;
+    for (;;) {
+      const read = fs.readSync(handle, buffer, 0, buffer.length, position);
+      if (read <= 0) break;
+      const chunk = buffer.subarray(0, read);
+      sha256.update(chunk);
+      blob.update(chunk);
+      position += read;
+    }
+  } finally {
+    fs.closeSync(handle);
+  }
+  return { sha256: sha256.digest("hex"), gitBlobSha: blob.digest("hex") };
 }
 
 /** A NUL byte in the first 8KB is the conventional binary heuristic. */

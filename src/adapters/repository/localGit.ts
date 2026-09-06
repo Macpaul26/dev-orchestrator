@@ -6,6 +6,7 @@ import { classifySensitivity } from "../../security/sensitive.js";
 import { resolveLimits, type InspectionLimits } from "../../security/limits.js";
 import { runGit, GitUnavailable, GitCommandNotPermitted } from "./gitExec.js";
 import type { RepositoryInspector } from "../../domain/inspector.js";
+import { FileFingerprint, type FileFingerprint as TFileFingerprint } from "../../domain/attribution.js";
 import {
   RepositoryEvidence, InspectionFailure, GitCommit,
   type InspectionOutcome, type FileContent, type DirectoryListing,
@@ -113,6 +114,50 @@ export class LocalGitRepositoryInspector implements RepositoryInspector {
     ]);
     if (!result.ok) return [];
     return parseCommits(result.stdout);
+  }
+
+  /**
+   * Fingerprint specific paths, existing or not.
+   *
+   * Verification needs this for paths the BASELINE knew about that have since
+   * left the status listing: deleted, committed, or reverted. Without
+   * re-fingerprinting them, all three look identical to "nothing happened".
+   */
+  async fingerprintPaths(paths: readonly string[]): Promise<TFileFingerprint[]> {
+    const prepared = this.prepare();
+    if ("failure" in prepared) return [];
+    return this.collectFingerprints(prepared.fs, paths, [], prepared.workingDir).fingerprints;
+  }
+
+  /** Paths touched by commits made since `baseSha`. */
+  async changedFilesSince(baseSha: string): Promise<string[]> {
+    if (!/^[0-9a-fA-F]{4,64}$/.test(baseSha)) return [];
+    const prepared = this.prepare();
+    if ("failure" in prepared) return [];
+    const result = this.git(prepared.workingDir, "diff", [
+      "--name-only", "-z", `${baseSha}..HEAD`, "--", ".",
+    ]);
+    if (!result.ok) return [];
+    return result.stdout.split("\0").filter(Boolean).slice(0, this.limits.maxListedFiles);
+  }
+
+  /**
+   * A diff limited to specific paths, optionally spanning back to `baseSha`.
+   *
+   * `baseSha` matters: when the run created commits, its changes are no longer
+   * in `git diff HEAD` at all. Diffing from the BASELINE commit captures
+   * committed and uncommitted work together, which is what "what did this run
+   * do" actually means.
+   */
+  async diffFor(
+    paths: readonly string[],
+    baseSha: string | null = null,
+  ): Promise<DiffEvidence> {
+    const prepared = this.prepare();
+    if ("failure" in prepared) {
+      return { text: "", bytes: 0, truncated: false, includedFiles: [], excludedFiles: [] };
+    }
+    return this.diffForPaths(prepared.workingDir, paths, baseSha);
   }
 
   // ---- setup and validation ------------------------------------------------
@@ -315,6 +360,17 @@ export class LocalGitRepositoryInspector implements RepositoryInspector {
       }
     });
 
+    // ---- fingerprints for attribution -------------------------------------
+    // Taken over every dirty path, so a later snapshot can tell "changed
+    // further" apart from "still dirty in the same way".
+    const fingerprinted = this.collectFingerprints(safe, changedFiles, changes, workingDir);
+    if (fingerprinted.truncated) {
+      notes.push(
+        `fingerprints limited to ${this.limits.maxFingerprintedFiles} paths; ` +
+          "attribution for the remainder will be less precise.",
+      );
+    }
+
     const evidence = RepositoryEvidence.parse({
       collectedAt: new Date().toISOString(),
       boundaryRoot: safe.boundary.root,
@@ -333,6 +389,8 @@ export class LocalGitRepositoryInspector implements RepositoryInspector {
       changes,
       diff,
       diffStat,
+      fingerprints: fingerprinted.fingerprints,
+      fingerprintsTruncated: fingerprinted.truncated,
       recentCommits,
       trackedFileCount,
       trackedFilesTruncated,
@@ -343,6 +401,114 @@ export class LocalGitRepositoryInspector implements RepositoryInspector {
     });
 
     return { ok: true, evidence };
+  }
+
+  /**
+   * Fingerprint a set of paths, bounded by `maxFingerprintedFiles`.
+   *
+   * `changes` supplies the git status code for each path so a fingerprint
+   * records not just the bytes but WHERE the change lives - a file can move
+   * between index and worktree with identical content, and that is still
+   * something this run did.
+   */
+  private collectFingerprints(
+    safe: SafeFs,
+    paths: readonly string[],
+    changes: readonly GitFileChange[],
+    workingDir?: string,
+  ): { fingerprints: TFileFingerprint[]; truncated: boolean } {
+    const byPath = new Map(changes.map((c) => [c.path, c]));
+    const unique = [...new Set(paths)].sort();
+    const capped = unique.slice(0, this.limits.maxFingerprintedFiles);
+
+    const fingerprints = capped.flatMap((relative) => {
+      let fingerprint: TFileFingerprint;
+      try {
+        fingerprint = safe.fingerprint(relative);
+      } catch {
+        // Outside the boundary - it cannot be ours, and must not be inspected.
+        return [];
+      }
+      const status = byPath.get(relative);
+      // For a path that is GONE from disk, ask git for the blob id its HEAD
+      // version had. That is an identifier, not content - nothing is read back
+      // out of the repository - and it is what makes a rename recognisable
+      // after the original file has already been removed.
+      const headBlobSha =
+        !fingerprint.present && workingDir ? this.headBlobShaFor(workingDir, relative) : null;
+
+      return [
+        FileFingerprint.parse({
+          ...fingerprint,
+          headBlobSha,
+          statusCode: status?.code ?? null,
+          staged: status?.staged ?? false,
+          unstaged: status?.unstaged ?? false,
+          untracked: status?.untracked ?? false,
+          renamedFrom: status?.renamedFrom ?? null,
+        }),
+      ];
+    });
+
+    return { fingerprints, truncated: unique.length > capped.length };
+  }
+
+  /**
+   * The git blob id of `relative` as it exists at HEAD, or null.
+   *
+   * `rev-parse HEAD:<path>` returns an object id and nothing else - no file
+   * contents cross this boundary, so this is safe even for a path the
+   * sensitive-file policy forbids reading.
+   */
+  private headBlobShaFor(workingDir: string, relative: string): string | null {
+    const result = this.git(workingDir, "rev-parse", [`HEAD:${relative}`]);
+    if (!result.ok) return null;
+    const sha = result.stdout.trim();
+    return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+  }
+
+  /**
+   * Build a diff for an explicit path list, dropping sensitive paths.
+   *
+   * Shared by the inspection pass and by `diffFor`, so there is exactly one
+   * place where paths become diff text - and therefore one place where the
+   * sensitive-file exclusion has to hold.
+   */
+  private diffForPaths(
+    workingDir: string,
+    paths: readonly string[],
+    baseSha: string | null,
+  ): DiffEvidence {
+    const excluded: { path: string; reason: string }[] = [];
+    const included: string[] = [];
+
+    for (const candidate of [...new Set(paths)].sort()) {
+      const verdict = classifySensitivity(candidate);
+      if (verdict.sensitive) {
+        excluded.push({ path: candidate, reason: verdict.detail ?? "sensitive file" });
+      } else {
+        included.push(candidate);
+      }
+    }
+
+    const empty: DiffEvidence = {
+      text: "", bytes: 0, truncated: false, includedFiles: [], excludedFiles: excluded,
+    };
+    if (included.length === 0) return empty;
+
+    const pathspecs = included.slice(0, MAX_DIFF_PATHSPECS);
+    const args = baseSha ? [baseSha, "--", ...pathspecs] : ["HEAD", "--", ...pathspecs];
+    const result = this.git(workingDir, "diff", args);
+    if (!result.ok) return empty;
+
+    const { text, truncated } = truncate(result.stdout, this.limits.maxDiffBytes);
+    return {
+      text,
+      bytes: Buffer.byteLength(result.stdout, "utf8"),
+      truncated,
+      includedFiles: pathspecs,
+      excludedFiles: excluded,
+    };
   }
 
   /**

@@ -367,6 +367,36 @@ export const review = (ctx: NodeContext) =>
         file,
       });
     }
+    // Deleting or reverting work is rarely what anyone asked for, so it is
+    // called out separately rather than folded into "files changed".
+    for (const file of evidence?.removedFiles ?? []) {
+      findings.push({ severity: "warning", message: "Deleted during this run.", file });
+    }
+    for (const file of evidence?.restoredFiles ?? []) {
+      findings.push({
+        severity: "warning",
+        message: "Reverted to HEAD during this run - uncommitted work may have been discarded.",
+        file,
+      });
+    }
+    for (const file of evidence?.attribution.metadataOnlyPaths ?? []) {
+      findings.push({
+        severity: "info",
+        message:
+          "Attributed from metadata rather than a content hash (sensitive or " +
+          "oversized), so this verdict may over-report a change.",
+        file,
+      });
+    }
+    if (evidence && !evidence.attribution.baselineAvailable && evidence.inspectionSucceeded) {
+      findings.push({
+        severity: "warning",
+        message:
+          "No pre-implementation baseline was captured, so changes could not be " +
+          "attributed to this run specifically. Reported changes may include work " +
+          "that was already in the working tree.",
+      });
+    }
     if (evidence && evidence.checksDeclared > evidence.checksExecuted) {
       findings.push({
         severity: "info",
@@ -423,9 +453,23 @@ export const approveReview = (ctx: NodeContext) =>
           verifiedIndependently: state.implementation?.verifiedIndependently ?? false,
           observedFileCount: state.implementation?.observedFiles.length ?? 0,
           observedCommitCount: state.implementation?.observedCommits.length ?? 0,
+          // What the diff actually covers. Never leave this implicit: a
+          // whole-repository diff on a dirty checkout looks identical to a
+          // diff of the run's own work.
+          observedDiffBasis: state.implementation?.observedDiffBasis ?? "none",
           scopeDrift: state.reviewEvidence?.scope.drift ?? [],
           checksDeclared: state.reviewEvidence?.checksDeclared ?? 0,
           checksExecuted: state.reviewEvidence?.checksExecuted ?? 0,
+          attribution: {
+            baselineAvailable: state.reviewEvidence?.attribution.baselineAvailable ?? false,
+            preExisting: state.reviewEvidence?.preExistingChanges.length ?? 0,
+            introduced: state.reviewEvidence?.introducedFiles ?? [],
+            modifiedDuringRun: state.reviewEvidence?.modifiedDuringRunFiles ?? [],
+            removed: state.reviewEvidence?.removedFiles ?? [],
+            renamed: state.reviewEvidence?.renamedFiles ?? [],
+            restored: state.reviewEvidence?.restoredFiles ?? [],
+            metadataOnly: state.reviewEvidence?.attribution.metadataOnlyPaths ?? [],
+          },
         },
       },
       createdAt: now(),

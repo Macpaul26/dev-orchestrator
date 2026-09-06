@@ -9,6 +9,8 @@ import {
   ReviewEvidence, ClaimComparison, type ReviewEvidence as TReviewEvidence,
 } from "../domain/evidence.js";
 import { classifyScope, normalisePath } from "../domain/scope.js";
+import { attributeChanges, AttributionSummary } from "../domain/attribution.js";
+import type { FileFingerprint, AttributionSummary as TAttributionSummary } from "../domain/attribution.js";
 import { classifySensitivity } from "../security/sensitive.js";
 
 /**
@@ -33,6 +35,22 @@ import { classifySensitivity } from "../security/sensitive.js";
  * The difference is what the implementation is answerable for. Without a
  * baseline, a repository that was already dirty would read as though the agent
  * had changed those files, and drift would be reported against work nobody did.
+ *
+ * ---------------------------------------------------------------------------
+ * ATTRIBUTION COMPARES STATE, NOT FILENAMES
+ * ---------------------------------------------------------------------------
+ * The two snapshots are compared by CONTENT FINGERPRINT, git status code and
+ * existence - not by differencing two lists of paths. That earlier approach had
+ * a hole big enough to hide the entire run's work in:
+ *
+ *   a file dirty at baseline AND modified further by the run stayed in both
+ *   sets, so the set difference was empty and the change was written off as
+ *   "pre-existing"
+ *
+ * Real repositories are dirty when work starts. The fix is better evidence, not
+ * refusing to inspect them - so a dirty tree is fully supported and
+ * `verifiedIndependently` does NOT depend on the tree being clean. See
+ * domain/attribution.ts.
  */
 
 export interface VerificationInput {
@@ -62,6 +80,41 @@ export interface VerificationResult {
 export class RepositoryVerifier {
   constructor(private readonly inspector: RepositoryInspector) {}
 
+  /**
+   * Build the attribution verdict from two snapshots.
+   *
+   * The subtlety is which paths to fingerprint AFTER the run. It is not enough
+   * to look at what is dirty now: a file the run DELETED, COMMITTED or REVERTED
+   * has left the status listing altogether, and would be invisible. So the
+   * "after" fingerprints are taken over the UNION of both snapshots' paths plus
+   * anything the run committed - each of those is re-stat'ed on disk, which is
+   * what makes deletions and reverts detectable at all.
+   */
+  private async attribute(
+    baseline: RepositoryEvidence | null,
+    after: RepositoryEvidence,
+    committedPaths: readonly string[],
+  ): Promise<TAttributionSummary> {
+    if (!baseline) return attributeChanges(null, after.fingerprints, committedPaths);
+
+    const afterByPath = new Map(after.fingerprints.map((f) => [normalisePath(f.path), f]));
+    const missing = [
+      ...new Set(
+        [...baseline.fingerprints.map((f) => f.path), ...committedPaths]
+          .map(normalisePath)
+          .filter((p) => !afterByPath.has(p)),
+      ),
+    ];
+
+    let afterFingerprints: FileFingerprint[] = after.fingerprints;
+    if (missing.length > 0) {
+      // Re-fingerprint the paths that vanished from the status listing.
+      afterFingerprints = [...after.fingerprints, ...(await this.inspector.fingerprintPaths(missing))];
+    }
+
+    return attributeChanges(baseline.fingerprints, afterFingerprints, committedPaths);
+  }
+
   /** The pre-implementation snapshot. Returns null if the repo cannot be read. */
   async captureBaseline(): Promise<RepositoryEvidence | null> {
     const outcome = await this.inspector.inspect();
@@ -89,6 +142,7 @@ export class RepositoryVerifier {
         claimedFiles,
         // Observed fields stay empty. There is deliberately no fallback here.
         observedDiff: null,
+        observedDiffBasis: "none",
         observedFiles: [],
         observedCommits: [],
         verifiedIndependently: false,
@@ -105,6 +159,7 @@ export class RepositoryVerifier {
           matches: false,
         }),
         scope: classifyScope([], allowedScope),
+        attribution: AttributionSummary.parse({ baselineAvailable: input.baseline != null }),
         allowedScope,
         checksDeclared: input.checksDeclared ?? 0,
         checksExecuted: input.checksExecuted ?? 0,
@@ -123,37 +178,33 @@ export class RepositoryVerifier {
     const notes: string[] = [];
 
     const observedFiles = [...after.changedFiles].map(normalisePath).sort();
-    const baselineFiles = new Set((baseline?.changedFiles ?? []).map(normalisePath));
 
-    // What is attributable to the implementation vs what was already dirty.
-    const attributable = baseline
-      ? observedFiles.filter((f) => !baselineFiles.has(f))
-      : observedFiles;
-    const preExisting = baseline
-      ? observedFiles.filter((f) => baselineFiles.has(f))
-      : [];
-    if (!baseline) {
-      notes.push(
-        "no pre-implementation baseline was captured; every currently changed file " +
-          "is treated as attributable, which may overstate what this run did.",
-      );
-    } else if (preExisting.length > 0) {
-      notes.push(
-        `${preExisting.length} file(s) were already modified before this run and are ` +
-          "excluded from scope-drift attribution.",
-      );
-    }
-
-    // Commits observed in git - never taken from a claim.
+    // ---- commits observed in git - never taken from a claim ---------------
     const headBefore = baseline?.headCommit ?? null;
     const headAfter = after.headCommit ?? null;
     let newCommits: GitCommit[] = [];
+    let committedPaths: string[] = [];
     if (headBefore && headAfter && headBefore !== headAfter) {
       newCommits = await this.inspector.commitsSince(headBefore);
+      // Work the run COMMITTED has left the status listing entirely. Without
+      // this it would look as though those files were never touched.
+      committedPaths = (await this.inspector.changedFilesSince(headBefore)).map(normalisePath);
     } else if (!headBefore && headAfter) {
       // First commit in a previously-unborn repository.
       newCommits = after.recentCommits.slice(0, 1);
       notes.push("repository had no commits at baseline; HEAD now exists.");
+    }
+
+    // ---- attribution: compare STATE, not filenames -------------------------
+    const attribution = await this.attribute(baseline, after, committedPaths);
+    const attributable = attribution.attributable;
+    const preExisting = attribution.preExisting;
+    notes.push(...attribution.notes);
+    if (attribution.modifiedDuringRun.length > 0 && preExisting.length > 0) {
+      notes.push(
+        `${preExisting.length} file(s) were dirty before this run and are unchanged ` +
+          `since; ${attribution.modifiedDuringRun.length} changed during it.`,
+      );
     }
 
     // A claimed commit is checked against git, not believed.
@@ -206,11 +257,40 @@ export class RepositoryVerifier {
      */
     const verifiedIndependently = true;
 
+    /**
+     * THE DIFF MUST NOT OVERSTATE THE RUN.
+     *
+     * `after.diff` is the WHOLE working tree against HEAD. On a repository that
+     * was already dirty that includes a colleague's uncommitted work, and
+     * presenting it as `observedDiff` would attribute their changes to this
+     * run. So the diff is regenerated for the attributable paths only, from the
+     * baseline commit - which also picks up anything the run committed.
+     */
+    let observedDiff: string | null = null;
+    let observedDiffBasis: "attributable" | "all_changes" | "none" = "none";
+    if (baseline && attributable.length > 0) {
+      const scoped = await this.inspector.diffFor(attributable, headBefore);
+      observedDiff = scoped.text;
+      observedDiffBasis = "attributable";
+      if (scoped.excludedFiles.length > 0) {
+        notes.push(
+          `${scoped.excludedFiles.length} sensitive file(s) excluded from the ` +
+            "attributable diff; their names are recorded, their contents are not.",
+        );
+      }
+    } else if (!baseline) {
+      // No baseline: we cannot attribute, so the diff is labelled as covering
+      // everything rather than silently passed off as the run's work.
+      observedDiff = after.diff?.text ?? null;
+      observedDiffBasis = observedDiff === null ? "none" : "all_changes";
+    }
+
     const report = ImplementationReport.parse({
       runId: input.runId,
       claimedSummary: input.claimedSummary ?? "",
       claimedFiles,
-      observedDiff: after.diff?.text ?? null,
+      observedDiff,
+      observedDiffBasis,
       observedFiles,
       observedCommits: newCommits.map((c) => c.sha),
       verifiedIndependently,
@@ -223,8 +303,14 @@ export class RepositoryVerifier {
       failure: null,
       baselineCaptured: baseline != null,
       claims,
+      attribution,
       attributableFiles: attributable,
       preExistingChanges: preExisting,
+      introducedFiles: attribution.introduced,
+      modifiedDuringRunFiles: attribution.modifiedDuringRun,
+      removedFiles: attribution.removed,
+      renamedFiles: attribution.renamed,
+      restoredFiles: attribution.restored,
       scope,
       allowedScope,
       driftBasis,

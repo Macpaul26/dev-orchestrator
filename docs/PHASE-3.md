@@ -208,6 +208,8 @@ ordinary `.ts` file, and it does not claim to.
 | `maxListedFiles` | 2,000 | 20,000 |
 | `maxDepth` | 8 | 32 |
 | `maxCommits` | 50 | 200 |
+| `maxFingerprintBytes` | 16 MB | 128 MB |
+| `maxFingerprintedFiles` | 2,000 | 20,000 |
 | `gitTimeoutMs` | 15,000 | 60,000 |
 | `gitMaxBufferBytes` | 4 MB | 8 MB |
 
@@ -278,14 +280,138 @@ report is unverified — not optimistic.
 
 ```
 inspect  ──▶ baseline snapshot ──┐
-                                 ├──▶ attributable = after − baseline
+         (fingerprints)          ├──▶ attribution: compare STATE
 verify   ──▶ after snapshot   ───┘
+         (fingerprints)
 ```
 
 Without a baseline, a repository that was *already* dirty would read as work
 this run performed, and drift would be reported against changes nobody made.
-`preExistingChanges` are recorded and excluded from drift attribution;
-`driftBasis` says which basis was used.
+
+**Real repositories are dirty.** A developer has uncommitted work in progress
+when the orchestrator starts. Refusing to inspect a dirty tree — or dropping
+`verifiedIndependently` to `false` whenever one is found — would make the system
+useless on exactly the repositories it exists to serve. `verifiedIndependently`
+does **not** depend on the tree being clean.
+
+---
+
+## 7a. Attribution — comparing state, not filenames
+
+`src/domain/attribution.ts`
+
+### The defect this replaced
+
+The first implementation differenced two lists of **paths**: dirty at baseline
+versus dirty afterwards. That has a hole big enough to hide an entire run's work
+in:
+
+```
+baseline:  src/auth.ts is already modified   -> in the baseline set
+run:       src/auth.ts is modified FURTHER   -> still in the after set
+verdict:   set difference is empty -> "pre-existing" -> THE RUN'S WORK VANISHED
+```
+
+A file being dirty before and dirty after says nothing about whether it is dirty
+*in the same way*. And the same flaw made `observedDiff` — the whole working
+tree against HEAD — present a colleague's uncommitted work as the run's output.
+
+### What is captured at each snapshot
+
+Every path that is dirty at snapshot time gets a `FileFingerprint`:
+
+| Field | Purpose |
+| --- | --- |
+| `contentHash` | SHA-256 of the bytes. The change signal. |
+| `blobSha` | Git blob SHA-1 of the current content — identical to `git hash-object` |
+| `headBlobSha` | Git blob id of the HEAD version, for a path now gone from disk |
+| `size`, `mtimeMs` | Fallback signal when no hash may be taken |
+| `statusCode`, `staged`, `unstaged`, `untracked` | *Where* the change lives |
+| `present`, `kind` | Existence and type |
+
+Both digests are produced in **one streamed pass** over 64 KB chunks, so memory
+is constant regardless of file size and the bytes are discarded immediately —
+only the digests survive.
+
+### The classification
+
+| Class | Meaning | Attributable |
+| --- | --- | --- |
+| `pre_existing` | Dirty at baseline, byte-identical since | **No** |
+| `introduced` | Did not exist at baseline | Yes |
+| `modified_during_run` | Content or index state changed — **including a file that was already dirty and changed further** | Yes |
+| `removed` | Existed at baseline, gone now | Yes |
+| `renamed` | Same content, different path | Yes |
+| `restored` | Was dirty, now matches HEAD again — the run undid someone's work | Yes |
+
+Only `pre_existing` is excluded. Everything else feeds scope-drift detection.
+
+### Cases that need more than a status listing
+
+A file the run **committed**, **deleted**, or **reverted** leaves
+`git status` entirely, and all three then look identical to "nothing happened".
+So attribution draws on three sources, not one:
+
+1. **Fingerprint comparison** over the union of both snapshots' paths.
+2. **Re-fingerprinting** paths the baseline knew about that are no longer dirty
+   — this is what makes a deletion or a revert visible at all.
+3. **`git diff --name-only <baseline>..HEAD`** — paths the run committed.
+
+A path with no baseline fingerprint was, by construction, **clean** at baseline
+— identical to HEAD — so anything dirty about it now happened during the run.
+Those verdicts are recorded with `basis: "git_status"`: git decided them, they
+are exact, and they carry **no** metadata-only caveat even for a sensitive file
+whose bytes were never hashed.
+
+### Staged ↔ unstaged transitions
+
+Staging a pre-existing change leaves the bytes identical but moves the change
+from the worktree to the index. That is something the run did, so it is
+`modified_during_run` with `indexStateOnly: true`, and the evidence names the
+transition (`" M" -> "M "`).
+
+### Rename detection without reading content
+
+A rename usually surfaces as a delete plus an untracked add. Matching them needs
+to know what the deleted file contained — but it is gone from disk, and reading
+it back out of git would mean pulling content into the process.
+
+Instead: `git rev-parse HEAD:<path>` returns the **blob id**, which is an
+identifier, not content. Matching it against the newly-appeared file's locally
+computed blob SHA-1 identifies the rename with nothing read back out of the
+repository. Git's own `R` status records (a staged `git mv`) are honoured too.
+
+### Sensitive files keep their contents
+
+**Attribution is never bought by hashing a credential.** A sensitive file is
+never hashed — not even to a digest. A SHA-256 of a low-entropy secret, stored
+permanently in an audit log, is a real disclosure risk, because it can be
+attacked by guessing.
+
+So sensitive files are attributed from `size`, `mtimeMs` and the git status code
+alone. Where the verdict genuinely rests on size or timestamp, it carries
+`basis: "metadata_only"`; where git's own status code settled it, it carries
+`basis: "git_status"` and is exact.
+`metadataOnlyPaths` lists them, the review gate raises an `info` finding for
+each, and the trade-off is stated rather than hidden:
+
+- it can **over-report** — `touch` looks like a change
+- it can **under-report** — a same-size edit within one mtime tick
+
+Over-reporting is the safer failure, and this biases toward it.
+
+### `observedDiff` cannot overstate the run
+
+`ImplementationReport.observedDiff` is regenerated for the **attributable paths
+only**, diffed from the baseline commit (`git diff <baseline> -- <paths>`), which
+also picks up anything the run committed. `observedDiffBasis` states what it
+covers and is never left implicit:
+
+| Value | Meaning |
+| --- | --- |
+| `attributable` | This run's changes, and only those |
+| `all_changes` | No baseline existed. **Overstates** what the run did |
+| `none` | No diff was collected |
 
 ### `verifiedIndependently`
 
@@ -405,9 +531,20 @@ check execution enabled: false
   `SRC/a.ts` and `src/a.ts` are the same file but different scope entries. Git
   reports one canonical case, so in practice this only bites a hand-written
   scope entry with the wrong case; it fails *closed* (reported as drift).
-- **Rename detection is partial.** `git status` reports `R` with the original
-  path, which is captured in `GitFileChange.renamedFrom`, but scope matching
-  considers only the new path.
+- **Rename detection has two blind spots.** It works when git reports the rename
+  itself, or when the vanished file's blob id can be matched against the new
+  file's. It does **not** fire when the file was renamed *and edited* in the same
+  run (the content no longer matches), nor for a **sensitive** file, whose bytes
+  are never hashed. Both degrade to `removed` + `introduced` — still fully
+  attributable, just less informative. Scope matching considers the new path.
+- **A change made and then perfectly reverted is invisible.** Only paths that are
+  dirty at a snapshot get fingerprinted, so a file edited and restored to its
+  exact baseline content within the run leaves no trace. The net effect on the
+  repository is nil, but the activity is not recorded.
+- **Metadata-only attribution for sensitive and oversized files** can over-report
+  (a `touch` reads as a change) and can under-report (a same-size edit inside one
+  mtime tick). Flagged per-path in `metadataOnlyPaths` and surfaced at the review
+  gate rather than hidden.
 - **`repositoryRootWithinBoundary: false` means a partial view.** Changes made
   above the boundary are invisible to inspection by design. If a coding agent
   ever gains write capability, its own containment must use the same

@@ -22,8 +22,21 @@ export const ImplementationReport = z.object({
   claimedFiles: z.array(z.string()).default([]),
 
   // ---- Observed: what our own tooling saw ----------------------------------
-  /** Unified diff read from git. Null until git inspection is implemented. */
+  /** Unified diff read from git, covering the ATTRIBUTABLE changes only. */
   observedDiff: z.string().nullable().default(null),
+  /**
+   * What `observedDiff` actually covers. Never leave this ambiguous.
+   *
+   *   attributable   the changes this run caused, and only those. A repository
+   *                  full of someone else's uncommitted work is excluded.
+   *   all_changes    every current change, because no baseline existed to
+   *                  attribute against. OVERSTATES what the run did.
+   *   none           no diff was collected.
+   *
+   * Without this field a whole-repository diff on a dirty checkout would read
+   * exactly like a diff of the run's own work.
+   */
+  observedDiffBasis: z.enum(["attributable", "all_changes", "none"]).default("none"),
   /** Paths from `git status --porcelain`. */
   observedFiles: z.array(z.string()).default([]),
   /** Commit SHAs observed in the repository. */

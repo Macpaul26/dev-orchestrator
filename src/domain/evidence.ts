@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { GitCommit, InspectionFailure } from "./repository.js";
 import { ScopeVerdict } from "./scope.js";
+import { AttributionSummary } from "./attribution.js";
 
 /**
  * REVIEW EVIDENCE
@@ -49,12 +50,23 @@ export const ReviewEvidence = z.object({
   claims: ClaimComparison,
 
   /**
-   * Files that changed BETWEEN the baseline and now - i.e. attributable to the
-   * implementation. Distinguished from files that were already dirty, so a
-   * repository that started messy does not read as scope drift.
+   * The full attribution verdict: which changes this run caused, and how that
+   * was established. See domain/attribution.ts.
+   *
+   * This replaces the earlier filename set-difference, which could not tell a
+   * file that was "already dirty" apart from one that was "already dirty and
+   * then changed again" - and silently dropped the run's work in that case.
    */
+  attribution: AttributionSummary,
+
+  /** Convenience projections of `attribution`, for callers that want a list. */
   attributableFiles: z.array(z.string()).default([]),
   preExistingChanges: z.array(z.string()).default([]),
+  introducedFiles: z.array(z.string()).default([]),
+  modifiedDuringRunFiles: z.array(z.string()).default([]),
+  removedFiles: z.array(z.string()).default([]),
+  renamedFiles: z.array(z.object({ from: z.string(), to: z.string() })).default([]),
+  restoredFiles: z.array(z.string()).default([]),
 
   scope: ScopeVerdict,
   /** The authorised scope this verdict was computed against. */

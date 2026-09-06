@@ -58,7 +58,27 @@ export function renderApproval(request: ApprovalRequest): void {
     line(`    independently verified: ${String(verification["verifiedIndependently"])}`);
     line(`    observed files ${String(verification["observedFileCount"])}, commits ${String(verification["observedCommitCount"])}`);
     const drift = (verification["scopeDrift"] as string[] | undefined) ?? [];
+    line(`    diff covers: ${String(verification["observedDiffBasis"] ?? "none")}`);
     line(`    scope drift: ${drift.length ? drift.join(", ") : "none"}`);
+    const attribution = verification["attribution"] as Record<string, unknown> | undefined;
+    if (attribution) {
+      if (attribution["baselineAvailable"] !== true) {
+        line("    attribution: NO BASELINE - changes cannot be attributed to this run");
+      } else {
+        const counts = (key: string): number =>
+          ((attribution[key] as unknown[] | undefined) ?? []).length;
+        line(
+          `    attribution: ${counts("introduced")} introduced, ` +
+          `${counts("modifiedDuringRun")} modified, ${counts("removed")} removed, ` +
+          `${counts("renamed")} renamed, ${counts("restored")} restored ` +
+          `(${String(attribution["preExisting"])} pre-existing, not this run)`,
+        );
+        const metadataOnly = (attribution["metadataOnly"] as string[] | undefined) ?? [];
+        if (metadataOnly.length > 0) {
+          line(`    metadata-only attribution: ${metadataOnly.join(", ")}`);
+        }
+      }
+    }
     line(`    checks declared ${String(verification["checksDeclared"])}, executed ${String(verification["checksExecuted"])}`);
   }
 
