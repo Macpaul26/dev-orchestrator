@@ -11,6 +11,10 @@ import {
   type WorkflowRun as TWorkflowRun,
 } from "../domain/index.js";
 import { projectsRoot, resolveWithin } from "../persistence/paths.js";
+import { ImplementationGrant, type ImplementationGrant as TGrant } from "../domain/grant.js";
+import {
+  ImplementationRun, type ImplementationRun as TImplementationRun,
+} from "../domain/implementation.js";
 
 /**
  * File-backed project store.
@@ -24,6 +28,10 @@ import { projectsRoot, resolveWithin } from "../persistence/paths.js";
  *     tasks/            one JSON per task
  *     runs/             one JSON per workflow run
  *     history/          one JSONL per run (see events/)
+ *     grants/           one JSON per implementation grant (Phase 4A)
+ *     implementations/  one JSON per implementation run (Phase 4A)
+ *     activity/         one JSONL per implementation run (Phase 4A)
+ *     implementation.lock  present while a mutating run holds the project
  *
  * Deliberately files, not a database: human-readable, diffable, git-friendly,
  * and editable by hand. Entirely independent of the LangGraph checkpoint DB.
@@ -181,5 +189,66 @@ export class ProjectStore {
 
   historyFile(projectId: string, runId: string): string {
     return this.sub(projectId, "history", `${runId}.jsonl`);
+  }
+
+  // ---- Implementation grants (Phase 4A) -----------------------------------
+
+  /**
+   * Persist an issued grant.
+   *
+   * THE STORED COPY IS AUTHORITATIVE. A caller presenting a grant is checked
+   * against this record, which is what stops an agent widening its own scope by
+   * editing the object it was handed.
+   */
+  saveGrant(grant: TGrant): TGrant {
+    const parsed = ImplementationGrant.parse(grant);
+    this.writeJson(this.sub(parsed.projectId, "grants", `${parsed.grantId}.json`), parsed);
+    return parsed;
+  }
+
+  getGrant(projectId: string, grantId: string): TGrant | null {
+    const raw = this.readJson<unknown>(this.sub(projectId, "grants", `${grantId}.json`));
+    return raw ? ImplementationGrant.parse(raw) : null;
+  }
+
+  listGrants(projectId: string): TGrant[] {
+    const dir = this.sub(projectId, "grants");
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => ImplementationGrant.parse(this.readJson<unknown>(path.join(dir, f))));
+  }
+
+  // ---- Implementation runs (Phase 4A) -------------------------------------
+
+  saveImplementation(run: TImplementationRun): TImplementationRun {
+    const parsed = ImplementationRun.parse(run);
+    this.writeJson(
+      this.sub(parsed.projectId, "implementations", `${parsed.runId}.json`),
+      parsed,
+    );
+    return parsed;
+  }
+
+  getImplementation(projectId: string, runId: string): TImplementationRun | null {
+    const raw = this.readJson<unknown>(
+      this.sub(projectId, "implementations", `${runId}.json`),
+    );
+    return raw ? ImplementationRun.parse(raw) : null;
+  }
+
+  listImplementations(projectId: string): TImplementationRun[] {
+    const dir = this.sub(projectId, "implementations");
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => ImplementationRun.parse(this.readJson<unknown>(path.join(dir, f))));
+  }
+
+  /** Per-operation journal, deliberately separate from the workflow history. */
+  activityFile(projectId: string, runId: string): string {
+    return this.sub(projectId, "activity", `${runId}.jsonl`);
   }
 }

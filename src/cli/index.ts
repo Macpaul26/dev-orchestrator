@@ -4,7 +4,9 @@ import path from "node:path";
 import { ProjectStore } from "../projects/projectStore.js";
 import { WorkflowRunner } from "../graph/runner.js";
 import { HumanDecision, Plan, type HumanDecisionKind } from "../domain/approval.js";
-import { createRegistry } from "../tools/registry.js";
+import { createRegistry, describeCapabilities } from "../tools/registry.js";
+import { ImplementationLock } from "../implementation/lock.js";
+import { ActivityJournal } from "../activity/journal.js";
 import { EventLog } from "../events/log.js";
 import { renderApproval, renderRun, renderRuns, renderInspection, line } from "./render.js";
 import { createInspectorForProject } from "../adapters/repository/index.js";
@@ -13,8 +15,8 @@ const program = new CliCommand();
 program
   .name("dev-agent")
   .description(
-    "AI Development Orchestrator (Phase 3 - read-only repository intelligence; " +
-    "no coding agent, no repository writes)",
+    "AI Development Orchestrator (Phase 4A - bounded, human-granted repository " +
+    "writes; no coding agent, no shell, no git mutation, no network)",
   )
   .version("0.1.0");
 
@@ -160,6 +162,73 @@ program
     if (!outcome.ok) process.exitCode = 1;
   });
 
+// --------------------------------------------------------- implementation ----
+program
+  .command("implementation:status")
+  .description("Show implementation runs and the project lock")
+  .requiredOption("--project <id>")
+  .action((opts: { project: string }) => {
+    const project = store.getProject(opts.project);
+    if (!project) { line(`unknown project ${opts.project}`); process.exitCode = 1; return; }
+
+    const { holder, alive } = ImplementationLock.forProject(store.dir(project.id)).describe();
+    if (!holder) {
+      line("lock     (none)");
+    } else {
+      const liveness =
+        alive === true ? "process running"
+        : alive === false ? "process NOT running - lock is stale"
+        : "liveness unknown (different host)";
+      line(`lock     held by run ${holder.runId} (pid ${holder.pid} on ${holder.hostname}); ${liveness}`);
+    }
+
+    const runs = store.listImplementations(project.id);
+    if (runs.length === 0) return line("no implementation runs");
+    for (const run of runs) {
+      const partial = run.partialChangesPossible ? "  PARTIAL CHANGES POSSIBLE" : "";
+      line(
+        `${run.runId}  ${run.status.padEnd(17)} writes ${run.writes} deletes ${run.deletes} ` +
+        `denials ${run.denials}${partial}`,
+      );
+    }
+  });
+
+program
+  .command("implementation:unlock")
+  .description("Clear a stale implementation lock. FOR HUMAN USE - never automatic.")
+  .requiredOption("--project <id>")
+  .action((opts: { project: string }) => {
+    const project = store.getProject(opts.project);
+    if (!project) { line(`unknown project ${opts.project}`); process.exitCode = 1; return; }
+
+    const lock = ImplementationLock.forProject(store.dir(project.id));
+    const { holder, alive } = lock.describe();
+    if (!holder) return line("no lock to clear");
+    if (alive === true) {
+      line(`refusing: run ${holder.runId} (pid ${holder.pid}) still appears to be running.`);
+      line("Stop it first, or clear the lock manually if you are certain.");
+      process.exitCode = 1;
+      return;
+    }
+    lock.forceRelease();
+    line(`cleared the lock held by run ${holder.runId}`);
+    line("NOTE: that run may have written partial changes. Inspect the repository:");
+    line(`      dev-agent inspect --project ${project.id}`);
+  });
+
+program
+  .command("activity")
+  .description("Print the implementation activity journal for a run")
+  .requiredOption("--run <runId>")
+  .action((opts: { run: string }) => {
+    const run = store.findRun(opts.run);
+    if (!run) { line(`unknown run ${opts.run}`); process.exitCode = 1; return; }
+    const journal = new ActivityJournal(store.activityFile(run.projectId, run.id));
+    const records = journal.read();
+    if (records.length === 0) return line("no implementation activity recorded for this run");
+    for (const record of records) line(JSON.stringify(record));
+  });
+
 // ------------------------------------------------------------------ tools ----
 program
   .command("tools")
@@ -175,8 +244,20 @@ program
       line(`${tool.name.padEnd(24)} ${tool.risk.padEnd(6)} ${access.padEnd(10)} ${registry.gate(tool.name)}`);
     }
     line("");
+    line("CAPABILITIES");
+    for (const status of describeCapabilities()) {
+      const state = status.implemented ? "available" : "NOT IMPLEMENTED";
+      line(`  ${status.capability.padEnd(22)} ${status.risk.padEnd(5)} ${state.padEnd(16)} ${status.requires}`);
+    }
+    line("");
     line(`write capabilities registered: ${registry.hasWriteCapability()}`);
+    line("  (a registry gains write tools only from a human-approved implementation");
+    line("   grant bound to one run and one scope; this listing has none)");
     line("shell execution available: false");
+    line("process execution available: false");
+    line("git mutation available: false");
+    line("network access available: false");
+    line("coding agent connected: false");
     line("check execution enabled: false");
   });
 

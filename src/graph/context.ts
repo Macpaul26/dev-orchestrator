@@ -4,6 +4,7 @@ import type { ApprovalRequest, HumanDecision } from "../domain/approval.js";
 import type { OrchestratorStateType } from "./state.js";
 import type { RepositoryInspector } from "../domain/inspector.js";
 import type { CheckRunner } from "../verification/checks.js";
+import type { ImplementationAgent } from "../implementation/runner.js";
 
 /**
  * Side-effect surface available to nodes.
@@ -22,6 +23,14 @@ export interface NodeContext {
   inspector: RepositoryInspector | null;
   /** Project-declared checks. Disabled in this phase; see verification/checks.ts. */
   checkRunner: CheckRunner;
+  /**
+   * The implementation agent, if one is configured.
+   *
+   * Null in production: Phase 4A builds the substrate and connects no coding
+   * agent to it. Tests supply a deterministic fake to exercise the boundary.
+   * A null agent means the implement node writes nothing at all.
+   */
+  agent: ImplementationAgent | null;
   emit(event: OrchestratorEvent): void;
   onApprovalRequested(request: ApprovalRequest): void;
   onApprovalReceived(decision: HumanDecision): void;

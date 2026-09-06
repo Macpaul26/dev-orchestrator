@@ -9,6 +9,11 @@ import {
 } from "../../domain/approval.js";
 import { ImplementationReport, ReviewReport } from "../../domain/reports.js";
 import { RepositoryVerifier } from "../../verification/verifier.js";
+import { issueGrant, grantIdFor } from "../../domain/grant.js";
+import {
+  ControlledImplementationRunner, NoOpImplementationAgent,
+} from "../../implementation/runner.js";
+import { CancellationToken } from "../../implementation/session.js";
 import type { OrchestratorStateType, OrchestratorUpdate } from "../state.js";
 import type { NodeContext } from "../context.js";
 import { now } from "../../events/log.js";
@@ -215,36 +220,140 @@ export const approvePlan = (ctx: NodeContext) =>
       };
     }
     // approve, or edit (which substitutes the human's revised plan)
+    const approvedPlan = decision.kind === "edit" ? decision.editedPlan! : state.proposedPlan;
+
+    /**
+     * THE HUMAN DECISION IS THE AUTHORISATION.
+     *
+     * This is the only place an implementation grant is minted, and it is
+     * downstream of a real `HumanDecision` carrying an approvalId and a
+     * decidedBy. There is no other path to write capability: no flag, no
+     * environment variable, no default, no "implementation enabled" setting.
+     *
+     * The grant inherits the scope the human approved - including narrowing
+     * they applied with `edit`. An empty allowedScope authorises nothing, so a
+     * plan that declared no scope produces a grant that can write nothing.
+     */
+    const grant = ctx.store.saveGrant(
+      issueGrant({
+        // Deterministic: this node body replays on resume. See grantIdFor.
+        grantId: grantIdFor(state.runId, state.revisions),
+        projectId: state.projectId,
+        runId: state.runId,
+        approvalId: request.approvalId,
+        approvedBy: decision.decidedBy,
+        allowedScope: approvedPlan?.allowedScope ?? [],
+        capabilities: ["repo.read", "repo.metadata.read", "repo.file.write", "repo.file.delete"],
+      }),
+    );
+
     return {
       decisions: [decision],
-      proposedPlan: decision.kind === "edit" ? decision.editedPlan! : state.proposedPlan,
+      proposedPlan: approvedPlan,
+      grant,
       pendingApprovalId: null,
       phase: "implement",
     };
   };
 
 // 5 ----------------------------------------------------------------- implement
+/**
+ * CONTROLLED IMPLEMENTATION.
+ *
+ * Runs an agent inside the bounded session authorised by the grant, and does
+ * NOTHING otherwise. Three separate conditions must all hold before a single
+ * byte can be written:
+ *
+ *   1. a grant exists - which requires a human to have approved the plan
+ *   2. an agent is configured - null in production throughout Phase 4A
+ *   3. the path the agent asks for is inside the approved scope
+ *
+ * The report produced here carries ONLY `claimed*` fields. Whatever the agent
+ * says it did is narrative; `verify` establishes what actually changed by
+ * inspecting the repository, and `verifiedIndependently` stays false until it
+ * has.
+ */
 export const implement = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "implement", at: now() });
 
-    // NO CODING AGENT IN THIS PHASE. The report is created with claimed* empty
-    // and observed* empty, and explicitly NOT verified independently.
-    const report = ImplementationReport.parse({
-      runId: state.runId,
-      claimedSummary: "",
-      claimedFiles: [],
-      observedDiff: null,
-      observedFiles: [],
-      observedCommits: [],
-      sessionId: null,
-      turns: 0,
-      verifiedIndependently: false,
-      createdAt: now(),
-    });
+    const unimplemented = (summary: string): OrchestratorUpdate => {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "implement", at: now() });
+      return {
+        implementation: ImplementationReport.parse({
+          runId: state.runId,
+          claimedSummary: summary,
+          claimedFiles: [],
+          observedDiff: null,
+          observedFiles: [],
+          observedCommits: [],
+          sessionId: null,
+          turns: 0,
+          verifiedIndependently: false,
+          createdAt: now(),
+        }),
+        phase: "verify",
+      };
+    };
+
+    if (!state.grant) {
+      return unimplemented("No implementation grant exists; nothing was attempted.");
+    }
+    const agent = ctx.agent ?? new NoOpImplementationAgent();
+    if (agent.name === "none") {
+      return unimplemented(
+        "No implementation agent is configured; the grant was issued but unused.",
+      );
+    }
+
+    const runner = new ControlledImplementationRunner({ store: ctx.store });
+    // Anything abandoned by a dead process becomes `interrupted` first, so a
+    // stale record can never be mistaken for a finished one.
+    runner.reconcile(state.projectId);
+
+    let claimedSummary: string;
+    let claimedFiles: string[] = [];
+    let implementationRun = null;
+
+    try {
+      const result = await runner.run(
+        state.grant,
+        {
+          instruction: state.request,
+          planSummary: state.proposedPlan?.summary ?? "",
+        },
+        agent,
+        new CancellationToken(),
+      );
+      implementationRun = result.run;
+      // UNTRUSTED. Kept strictly on the claimed side of the report.
+      claimedSummary = result.agentReport.summary;
+      claimedFiles = result.agentReport.files;
+    } catch (error) {
+      // A refused run is a normal outcome, not a crash. Verification still
+      // happens: a denial may have arrived after some writes had landed.
+      claimedSummary = `Implementation did not run: ${
+        error instanceof Error ? error.name : "unknown error"
+      }`;
+    }
 
     ctx.emit({ type: "node_completed", runId: state.runId, node: "implement", at: now() });
-    return { implementation: report, phase: "verify" };
+    return {
+      implementation: ImplementationReport.parse({
+        runId: state.runId,
+        claimedSummary,
+        claimedFiles,
+        observedDiff: null,
+        observedFiles: [],
+        observedCommits: [],
+        sessionId: null,
+        turns: 0,
+        verifiedIndependently: false,
+        createdAt: now(),
+      }),
+      implementationRun,
+      phase: "verify",
+    } as OrchestratorUpdate;
   };
 
 // 6 -------------------------------------------------------------------- verify
@@ -396,6 +505,26 @@ export const review = (ctx: NodeContext) =>
           "attributed to this run specifically. Reported changes may include work " +
           "that was already in the working tree.",
       });
+    }
+    const implementationRun = state.implementationRun;
+    if (implementationRun) {
+      if (implementationRun.partialChangesPossible) {
+        findings.push({
+          severity: "warning",
+          message:
+            `The implementation ended as "${implementationRun.status}", so the repository ` +
+            "may hold partial work. Nothing was rolled back - the changes listed below " +
+            "are what inspection actually found.",
+        });
+      }
+      if (implementationRun.denials > 0) {
+        findings.push({
+          severity: "warning",
+          message:
+            `${implementationRun.denials} operation(s) were refused during implementation. ` +
+            "See the activity journal for what was attempted.",
+        });
+      }
     }
     if (evidence && evidence.checksDeclared > evidence.checksExecuted) {
       findings.push({

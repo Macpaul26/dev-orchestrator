@@ -18,6 +18,7 @@ import {
 import { createCheckpointer, closeCheckpointer } from "../persistence/checkpointer.js";
 import { createInspectorForProject } from "../adapters/repository/index.js";
 import { DisabledCheckRunner } from "../verification/checks.js";
+import type { ImplementationAgent } from "../implementation/runner.js";
 
 export interface RunResult {
   run: TWorkflowRun;
@@ -48,12 +49,17 @@ export class WorkflowRunner {
   /** True when this runner opened the checkpointer and therefore owns closing it. */
   private readonly ownsCheckpointer: boolean;
 
+  /** Null unless a caller explicitly supplies one. Never defaulted. */
+  private readonly agent: ImplementationAgent | null;
+
   constructor(
     private readonly store: ProjectStore = new ProjectStore(),
     checkpointer?: BaseCheckpointSaver,
+    options: { agent?: ImplementationAgent | null } = {},
   ) {
     this.ownsCheckpointer = checkpointer === undefined;
     this.checkpointer = checkpointer ?? createCheckpointer();
+    this.agent = options.agent ?? null;
   }
 
   /**
@@ -81,6 +87,9 @@ export class WorkflowRunner {
       inspector: project ? createInspectorForProject(project) : null,
       // Declared checks are recorded, never run. See verification/checks.ts.
       checkRunner: new DisabledCheckRunner(),
+      // Null in production - Phase 4A connects no coding agent. Tests inject a
+      // deterministic fake to exercise the capability boundary.
+      agent: this.agent,
       emit: (event: OrchestratorEvent) => { log.append(event); },
       onApprovalRequested: (request) => {
         captured.approval = ApprovalRequest.parse(request);

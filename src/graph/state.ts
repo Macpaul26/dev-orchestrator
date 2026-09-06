@@ -3,6 +3,8 @@ import type { Plan, HumanDecision } from "../domain/approval.js";
 import type { ImplementationReport, ReviewReport, CheckResult } from "../domain/reports.js";
 import type { RepositoryEvidence, InspectionFailure } from "../domain/repository.js";
 import type { ReviewEvidence } from "../domain/evidence.js";
+import type { ImplementationGrant } from "../domain/grant.js";
+import type { ImplementationRun } from "../domain/implementation.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
 
 /**
@@ -57,6 +59,22 @@ export const OrchestratorState = Annotation.Root({
   decisions: Annotation<HumanDecision[]>({
     reducer: (prev, next) => [...prev, ...next],
     default: () => [],
+  }),
+
+  // ---- implementation authorisation ---------------------------------------
+  /**
+   * The grant minted when a human approved the plan.
+   *
+   * Null until then, and null again on any path that did not reach approval.
+   * There is no other way for the implement node to obtain write capability -
+   * no flag, no environment variable, no default.
+   */
+  grant: Annotation<ImplementationGrant | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /** What the orchestrator observed itself doing. Not the agent's account. */
+  implementationRun: Annotation<ImplementationRun | null>({
+    reducer: (_p, n) => n, default: () => null,
   }),
 
   // ---- implement / verify / review ----------------------------------------

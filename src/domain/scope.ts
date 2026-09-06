@@ -68,6 +68,29 @@ export const ScopeVerdict = z.object({
 });
 export type ScopeVerdict = z.infer<typeof ScopeVerdict>;
 
+/**
+ * Does this path contain a `..` SEGMENT?
+ *
+ * Scope matching is prefix-based, so without this check a path could satisfy an
+ * authorised prefix and then climb straight back out of it:
+ *
+ *     "src/../../etc/passwd".startsWith("src/")   ->  true
+ *
+ * That string is lexically "inside src/" and physically nowhere near it. Any
+ * path containing a traversal segment therefore matches NO scope entry and is
+ * always reported as drift - the safe direction.
+ *
+ * (The filesystem boundary rejects such a path independently. This is the
+ * second of the two checks, not the only one - but a scope layer that says
+ * "authorised" about a traversal string is wrong on its own terms.)
+ */
+export function containsTraversal(input: string): boolean {
+  return input
+    .replace(/[\\/]+/g, "/")
+    .split("/")
+    .some((segment) => segment === "..");
+}
+
 /** Forward slashes, no leading `./`, no trailing slash, no duplicate slashes. */
 export function normalisePath(input: string): string {
   let value = input.replace(/[\\/]+/g, "/").trim();
@@ -142,13 +165,17 @@ export function classifyScope(
     });
   }
 
-  const matchers = patterns.map((pattern) => ({ pattern, test: compile(pattern) }));
+  // A pattern that climbs out of the project authorises nothing.
+  const matchers = patterns
+    .filter((pattern) => !containsTraversal(pattern))
+    .map((pattern) => ({ pattern, test: compile(pattern) }));
   const used = new Set<string>();
   const inScope: string[] = [];
   const drift: string[] = [];
 
   for (const file of observed) {
-    const matched = matchers.filter((m) => m.test(file));
+    // Traversal short-circuits every pattern: see `containsTraversal`.
+    const matched = containsTraversal(file) ? [] : matchers.filter((m) => m.test(file));
     if (matched.length > 0) {
       inScope.push(file);
       for (const m of matched) used.add(m.pattern);

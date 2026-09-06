@@ -25,15 +25,19 @@ implementation capability:
 
 ## Current status
 
-**Phase 3 is implemented: secure, read-only repository intelligence.**
+**Phase 4A is implemented: the controlled-hands foundation.**
 
 Real: the workflow, checkpointing, approval interrupts, project store, the
 filesystem security boundary, read-only git inspection, independent
-claimed-vs-observed verification, and deterministic scope-drift detection.
+claimed-vs-observed verification, deterministic scope-drift detection, and -
+new in this phase - **bounded repository writes that require a human-approved,
+expiring, scope-bound grant**, an orchestrator-written activity journal, a
+project-level implementation lock, and durable implementation lifecycle state.
 
 Not real, deliberately: there is no coding agent, no model call, no GitHub
-access, no shell execution, no check execution, and **no way for this system to
-modify a repository**.
+access, no shell or process execution, no git mutation, no network access, and
+no check execution. Writing requires a grant that only a human approval can
+produce; there is no global "implementation enabled" switch anywhere.
 
 ```
 $ node dist/cli/index.js tools
@@ -46,6 +50,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-4A.md](docs/PHASE-4A.md) | The capability model, implementation grants, the write boundary, the activity journal, cancellation, process death, concurrency, and why Claude Code is not integrated yet |
 | [docs/PHASE-3.md](docs/PHASE-3.md) | Repository inspection, the security boundary, symlink handling, sensitive-file policy, scope semantics, evidence provenance |
 | [docs/PHASE-1-2.md](docs/PHASE-1-2.md) | The workflow, durable resume, the approval invariant |
 | [docs/ARCHITECTURE-PROPOSAL.md](docs/ARCHITECTURE-PROPOSAL.md) | The overall design |
@@ -78,7 +83,10 @@ node dist/cli/index.js resume --run <runId> --decision approve
 | Shell | None. `spawnSync` with `shell: false` and an argv array; `git` is the only executable. |
 | Secrets in the child environment | None. The environment is built, not inherited. |
 | Secrets in state / checkpoints / history | Sensitive files are reported by name; contents are never captured. |
-| Write-capable tools | None registered. Asserted by test. |
+| Write-capable tools | Only from a human-approved grant, bound to one run and one scope. None otherwise; asserted by test. |
+| Capability escalation | The session uses native `#` private fields; the grant is deep-frozen. No cast reaches the unchecked writer, the grant, or the journal. |
+| Concurrent mutation | Project-level lock, atomically acquired. A stale lock fails closed and needs a human. |
+| Rollback | **None, and none claimed.** Every non-clean terminal state keeps `partialChangesPossible`, and verification always runs. |
 | Model calls | None. No API key is read or required. |
 
 ## Scripts
