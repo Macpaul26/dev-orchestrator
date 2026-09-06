@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -246,6 +247,26 @@ export class ProjectStore {
   }
 
   /**
+   * The id of the claim currently in force, or null if unclaimed.
+   *
+   * A session compares this against the claim that authorised it. If they
+   * differ, some OTHER attempt now holds the grant and this session's authority
+   * is gone - which is not the same thing as the grant merely being consumed.
+   */
+  grantClaimId(projectId: string, grantId: string): string | null {
+    const file = this.grantClaimFile(projectId, grantId);
+    if (!fs.existsSync(file)) return null;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { claimId?: unknown };
+      return typeof parsed.claimId === "string" ? parsed.claimId : "unknown-claim";
+    } catch {
+      // A claim we cannot read is still a claim. Fail closed by returning a
+      // value that will not match anybody's recorded claim id.
+      return "unreadable-claim";
+    }
+  }
+
+  /**
    * CLAIM A GRANT FOR ONE IMPLEMENTATION ATTEMPT. Atomic, and one-shot.
    *
    *   > One human approval produces one bounded implementation grant, and that
@@ -277,11 +298,20 @@ export class ProjectStore {
     // The claim is already committed by the open above. Everything below is
     // record-keeping; if it fails, the grant stays consumed - which is the
     // conservative direction.
+    // A unique id for THIS claim. It is what lets a live session ask "is the
+    // claim that authorised me still the one in force?", which is a different
+    // question from "is this grant consumed?" - the grant is consumed the
+    // instant its own attempt starts, and that must not stop that attempt.
+    const claimId = `clm_${crypto.randomUUID()}`;
     try {
       fs.writeFileSync(
         handle,
         `${JSON.stringify(
-          { grantId, claimedAt: new Date().toISOString(), pid: process.pid, hostname: os.hostname() },
+          {
+            grantId, claimId,
+            claimedAt: new Date().toISOString(),
+            pid: process.pid, hostname: os.hostname(),
+          },
           null,
           2,
         )}\n`,

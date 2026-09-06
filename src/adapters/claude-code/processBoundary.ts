@@ -12,6 +12,7 @@ import {
   type ClaudeCodeConfig, validateConfig, buildAgentEnvironment,
   ClaudeCodeConfigError,
 } from "./config.js";
+import { PROTOCOL_LIMITS } from "../../domain/toolProtocol.js";
 
 /**
  * THE AGENT PROCESS BOUNDARY
@@ -70,6 +71,14 @@ export interface LaunchOptions {
   payload: AgentRequestPayload;
   /** Paths the child's cwd must not be, or contain. */
   forbiddenDirectories?: readonly string[];
+  /**
+   * Handle one raw protocol line from the child.
+   *
+   * Absent means the child has NO tool channel at all: fd 3 is still opened so
+   * a child expecting it does not break, but nothing it writes there is acted
+   * on. That is the Phase 4B.1 posture, and it remains the default.
+   */
+  onToolRequest?: (line: string) => Promise<string>;
   now?: () => Date;
 }
 
@@ -210,7 +219,7 @@ export function launchAgentProcess(options: LaunchOptions): AgentProcessHandle {
 
   const startedAt = now();
   const handle = AgentProcessHandle.create(options, (self) =>
-    run(self, config, workingDir, options.payload, now, startedAt),
+    run(self, config, workingDir, options.payload, now, startedAt, options.onToolRequest),
   );
   return handle;
 }
@@ -279,6 +288,7 @@ async function run(
   payload: AgentRequestPayload,
   now: () => Date,
   startedAt: Date,
+  onToolRequest?: (line: string) => Promise<string>,
 ): Promise<AgentProcessOutcome> {
   let child: ChildProcess;
   try {
@@ -288,7 +298,17 @@ async function run(
       // NO SHELL. The argv array is passed to the OS as-is, so nothing here is
       // ever parsed as a command line.
       shell: false,
-      stdio: ["pipe", "pipe", "pipe"],
+      /**
+       * fd 3 carries tool REQUESTS, child -> orchestrator. Responses go back on
+       * stdin. See the channel contract where the payload is written.
+       *
+       * Keeping requests off stdout is deliberate. Sharing it would mean
+       * narrative and protocol arrive on one stream and something has to tell
+       * them apart - a stray line of prose could parse as a request, and
+       * protocol traffic would inflate the "agent output" counters. A separate
+       * descriptor makes that impossible rather than unlikely.
+       */
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
       windowsHide: true,
     });
   } catch (error) {
@@ -297,18 +317,83 @@ async function run(
 
   handle._attach(child, startedAt);
 
-  // The request goes in on stdin rather than argv: it is data, it can be long,
-  // and it never has to be quoted or escaped anywhere.
+  /**
+   * THE CHANNEL CONTRACT
+   *
+   *   stdin   line 1 is the session payload; further lines are tool responses
+   *   fd 3    tool requests, child -> orchestrator
+   *   stdout  untrusted narrative, and nothing else
+   *
+   * stdin stays OPEN, because it is how responses get back. A child therefore
+   * reads it LINE BY LINE and must not read it to EOF - the close will not come
+   * until the run is over.
+   *
+   * Responses do not go back out on fd 3, and that is not an aesthetic choice.
+   * Writing to the parent's end of a fourth pipe on Windows stops the
+   * ChildProcess `exit` and `close` events firing at all: the child terminates,
+   * the orchestrator never learns of it, and the run hangs until its timeout.
+   * That was measured, not assumed - see docs/PHASE-4B2.md.
+   */
   try {
-    child.stdin?.end(`${JSON.stringify(payload)}\n`, "utf8");
+    child.stdin?.write(`${JSON.stringify(payload)}\n`, "utf8");
   } catch {
-    // A child that closed stdin immediately is not an error on our side.
+    // A child that closed its input immediately is not an error on our side.
   }
 
   const stdout = new BoundedCapture(config.maxOutputBytes);
   const stderr = new BoundedCapture(config.maxOutputBytes);
   child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+
+  // ---- the tool protocol channel ----------------------------------------
+  let protocolAbort: string | null = null;
+  /** Serialises protocol handling. See the note at its use below. */
+  let protocolQueue: Promise<void> = Promise.resolve();
+  const toolChannel = child.stdio[3] as NodeJS.ReadableStream | null | undefined;
+  if (toolChannel) {
+    const reader = new BoundedLineReader(PROTOCOL_LINE_LIMIT);
+    toolChannel.on("data", (chunk: Buffer) => {
+      let lines: string[];
+      try {
+        lines = reader.push(chunk);
+      } catch (error) {
+        /**
+         * A child writing an unbounded line is trying to exhaust memory.
+         * There is no useful partial request to salvage, so the run is ended
+         * rather than the buffer grown.
+         */
+        protocolAbort = (error as Error).message;
+        void handle.terminate("protocol limit exceeded");
+        return;
+      }
+      for (const line of lines) {
+        if (line.trim().length === 0) continue;
+        /**
+         * SERIALISED, not concurrent.
+         *
+         * Handling requests in parallel would let an agent interleave
+         * operations against shared session state - the mutation counter, the
+         * duplicate-id set - and would make responses arrive in an order that
+         * depends on how fast each one happened to be. One request at a time
+         * makes the boundary's behaviour deterministic and removes that class
+         * of race entirely. An agent that wants concurrency does not get it.
+         */
+        protocolQueue = protocolQueue.then(async () => {
+          const response = onToolRequest
+            ? await onToolRequest(line)
+            : JSON.stringify({
+                requestId: "(unknown)", ok: false, result: null,
+                error: { code: "session_closed", message: "no tool channel is available" },
+              });
+          try {
+            child.stdin?.write(`${response}\n`, "utf8");
+          } catch {
+            // The child closed its input; nothing more to deliver.
+          }
+        });
+      }
+    });
+  }
 
   const timeout = setTimeout(() => {
     void handle.terminate("timed out");
@@ -356,11 +441,18 @@ async function run(
     signal: ended.signal,
     launchFailure: null,
     detail:
-      timedOut ? "the agent exceeded its time budget and was terminated"
+      protocolAbort ? protocolAbort
+      : timedOut ? "the agent exceeded its time budget and was terminated"
       : status === "interrupted" ? `terminated by ${ended.signal} without an orchestrator request`
       : null,
     forciblyKilled: state.forciblyKilled,
   });
+
+  try {
+    child.stdin?.end();
+  } catch {
+    // Already closed.
+  }
 
   const text = stdout.text();
   const claimedReport = parseClaimedReport(text);
@@ -434,6 +526,43 @@ class BoundedCapture {
 
   text(): string {
     return Buffer.concat(this.chunks).toString("utf8");
+  }
+}
+
+/** One protocol line may not exceed this. See `BoundedLineReader`. */
+const PROTOCOL_LINE_LIMIT = PROTOCOL_LIMITS.maxRequestBytes;
+
+/**
+ * Split a byte stream into lines WITHOUT unbounded buffering.
+ *
+ * The naive version accumulates until it sees a newline, which hands a hostile
+ * child a trivial memory-exhaustion attack: write gigabytes and never send one.
+ * This throws once the pending fragment passes the limit, and the caller ends
+ * the run rather than growing the buffer.
+ */
+export class BoundedLineReader {
+  #pending = "";
+
+  constructor(private readonly limit: number) {}
+
+  push(chunk: Buffer): string[] {
+    this.#pending += chunk.toString("utf8");
+    const lines: string[] = [];
+
+    let index = this.#pending.indexOf("\n");
+    while (index !== -1) {
+      lines.push(this.#pending.slice(0, index));
+      this.#pending = this.#pending.slice(index + 1);
+      index = this.#pending.indexOf("\n");
+    }
+
+    if (Buffer.byteLength(this.#pending, "utf8") > this.limit) {
+      this.#pending = "";
+      throw new Error(
+        `agent sent a protocol line larger than the ${this.limit}-byte limit`,
+      );
+    }
+    return lines;
   }
 }
 

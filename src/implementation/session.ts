@@ -121,6 +121,23 @@ export class ImplementationCancelled extends Error {
   }
 }
 
+/**
+ * A re-check against the AUTHORITATIVE stored record.
+ *
+ * The session holds a frozen in-memory grant, which is what makes fingerprint
+ * and expiry checks cheap and tamper-proof. But an in-memory copy cannot notice
+ * that the record on disk was revoked, deleted, or claimed by a different
+ * attempt while this session was running - so anything that must reflect the
+ * outside world goes through here instead.
+ *
+ * Optional: a session built without one still enforces every in-memory check.
+ * Supplying one is strictly additional strictness.
+ */
+export interface GrantAuthority {
+  /** Throw `GrantDenied` if the authority behind this session is no longer valid. */
+  revalidate(): void;
+}
+
 /** Counters the ORCHESTRATOR maintains. The agent cannot touch them. */
 export interface SessionCounters {
   writes: number;
@@ -157,6 +174,7 @@ export class ImplementationSession {
   readonly #cancellation: CancellationToken;
   readonly #clock: () => Date;
   readonly #counters: SessionCounters = { writes: 0, deletes: 0, denials: 0 };
+  readonly #authority: GrantAuthority | null;
 
   constructor(
     grant: ImplementationGrant,
@@ -165,7 +183,9 @@ export class ImplementationSession {
     journal: ActivityJournal,
     cancellation: CancellationToken,
     clock: () => Date = () => new Date(),
+    authority: GrantAuthority | null = null,
   ) {
+    this.#authority = authority;
     // Frozen as well as private: a caller that already holds a reference to the
     // same grant object cannot widen it underneath us either.
     this.#grant = deepFreezeGrant(grant);
@@ -197,6 +217,15 @@ export class ImplementationSession {
   /** Orchestrator-maintained totals. A copy, so the agent cannot rewrite them. */
   get stats(): SessionCounters {
     return { ...this.#counters };
+  }
+  /**
+   * The grant's mutation ceiling, so a caller can report remaining budget.
+   *
+   * A number, not a setter. Reading it changes nothing, and there is
+   * deliberately no way to raise it - the value lives on the frozen grant.
+   */
+  get mutationBudget(): number {
+    return this.#grant.maxWrites;
   }
 
   // ---- read -------------------------------------------------------------
@@ -348,6 +377,10 @@ export class ImplementationSession {
         runId: this.#grant.runId,
         now: this.#clock(),
       });
+      // The stored record, not the copy we are holding. Catches revocation,
+      // deletion, tampering, and a different attempt taking the grant - none of
+      // which an in-memory snapshot can see.
+      this.#authority?.revalidate();
       assertCapability(this.#grant, capability);
     } catch (error) {
       this.recordDenial(capability, relativePath, correlationId, error);

@@ -5,6 +5,7 @@ import { SafeWriteFs } from "../security/writeBoundary.js";
 import { resolveLimits, type InspectionLimits } from "../security/limits.js";
 import { ActivityJournal, newCorrelationId } from "../activity/journal.js";
 import { ImplementationLock, LockDenied } from "./lock.js";
+import { StoredGrantAuthority } from "./grantAuthority.js";
 import {
   ImplementationSession, CancellationToken, ImplementationCancelled,
 } from "./session.js";
@@ -276,6 +277,12 @@ export class ControlledImplementationRunner {
       journal,
       cancellation,
       this.clock,
+      // Re-checks the AUTHORITATIVE record on every capability use, carrying
+      // the claim id this attempt took - so revocation, deletion, tampering or
+      // another attempt seizing the grant all stop this session immediately.
+      new StoredGrantAuthority(
+        store, stored, store.grantClaimId(stored.projectId, stored.grantId),
+      ),
     );
 
     journal.append({

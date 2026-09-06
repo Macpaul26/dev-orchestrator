@@ -235,6 +235,31 @@ export const ActivityRecord = z.discriminatedUnion("type", [
     /** True when SIGTERM was ignored and the process had to be killed. */
     forciblyKilled: z.boolean().default(false),
   }),
+  /**
+   * CONTROLLED TOOL BRIDGE (Phase 4B.2).
+   *
+   * Written by the orchestrator inside the bridge, never by the agent. The path
+   * recorded is the repository-relative one the SESSION resolved - never an
+   * absolute host path - and no file content, argument value or protocol
+   * payload appears here.
+   */
+  z.object({
+    type: z.literal("bridge_request_completed"),
+    ...base,
+    requestId: z.string().max(128),
+    tool: z.string(),
+    capability: z.string(),
+    path: z.string().max(512),
+    ok: z.boolean(),
+    denial: z.string().nullable().default(null),
+  }),
+  z.object({
+    type: z.literal("bridge_request_rejected"),
+    ...base,
+    requestId: z.string().max(128),
+    /** A closed-vocabulary code. Never an exception message. */
+    code: z.string(),
+  }),
   z.object({ type: z.literal("lock_acquired"), ...base, holder: z.string() }),
   z.object({ type: z.literal("lock_released"), ...base }),
   z.object({

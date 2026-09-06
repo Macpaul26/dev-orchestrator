@@ -25,6 +25,14 @@ implementation capability:
 
 ## Current status
 
+**Phase 4B.2 is implemented: the controlled tool bridge.**
+
+Claude Code can now act on a repository — but only through four typed,
+grant-bound operations (`read_file`, `list_directory`, `write_file`,
+`delete_file`) that run through the Phase 4A session. It never receives a raw
+filesystem API, and the request protocol has no field for a grant, project,
+session, scope or budget, so authority is not something it can name.
+
 **Phase 4B.1 is implemented: the controlled Claude Code process boundary.**
 
 Claude Code can now be launched as an untrusted implementation agent behind a
@@ -61,6 +69,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-4B2.md](docs/PHASE-4B2.md) | The controlled tool bridge: the four-operation protocol, per-invocation authorisation, path and budget enforcement, protocol hardening, and the hostile-agent tests |
 | [docs/PHASE-4B1.md](docs/PHASE-4B1.md) | The Claude Code adapter, the process boundary, environment isolation, output provenance, cancellation — and precisely what the boundary does *not* protect |
 | [docs/PHASE-4A.md](docs/PHASE-4A.md) | The capability model, implementation grants, the write boundary, the activity journal, cancellation, process death, concurrency, and why Claude Code is not integrated yet |
 | [docs/PHASE-3.md](docs/PHASE-3.md) | Repository inspection, the security boundary, symlink handling, sensitive-file policy, scope semantics, evidence provenance |
@@ -98,6 +107,7 @@ node dist/cli/index.js resume --run <runId> --decision approve
 | Write-capable tools | Only from a human-approved grant, bound to one run and one scope. None otherwise; asserted by test. |
 | Capability escalation | The session uses native `#` private fields; the grant is deep-frozen. No cast reaches the unchecked writer, the grant, or the journal. |
 | Concurrent mutation | Project-level lock, atomically acquired. A stale lock fails closed and needs a human. |
+| Agent tool access | Four typed operations through the Phase 4A session. No raw `fs`, no shell, no git, no network. Authority fields are unrepresentable in the protocol. |
 | Agent process | Untrusted. Fixed executable, `shell: false`, built environment with no credentials, bounded cwd, terminable. Spawning stays confined to two enumerated adapters. |
 | Rollback | **None, and none claimed.** Every non-clean terminal state keeps `partialChangesPossible`, and verification always runs. |
 | Model calls | None. No API key is read or required. |

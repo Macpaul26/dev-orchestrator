@@ -7,6 +7,7 @@ import { ImplementationCancelled } from "../../implementation/session.js";
 import { AgentReport, type AgentReport as TAgentReport } from "../../domain/implementation.js";
 import type { AgentProcessOutcome } from "./processBoundary.js";
 import { launchAgentProcess, AgentLaunchRefused } from "./processBoundary.js";
+import { ToolBridge } from "../../implementation/toolBridge.js";
 import type { ClaudeCodeConfig } from "./config.js";
 import type { ActivityJournal } from "../../activity/journal.js";
 import { newCorrelationId } from "../../activity/journal.js";
@@ -80,12 +81,23 @@ export class ClaudeCodeAgent implements ImplementationAgent {
       executable: path.basename(this.config.executable),
     });
 
+    /**
+     * THE CONTROLLED TOOL BRIDGE.
+     *
+     * Built here, from the TRUSTED session the runner handed us. The child gets
+     * a pipe it can write requests to - never the session, never the grant,
+     * never a filesystem handle. Every request it sends is re-authorised from
+     * scratch against this session.
+     */
+    const bridge = new ToolBridge({ session, cancellation, journal: this.journal });
+
     let handle: ReturnType<typeof launchAgentProcess>;
     try {
       handle = launchAgentProcess({
         config: this.config,
         workingDir,
         forbiddenDirectories: request.forbiddenDirectories ?? [],
+        onToolRequest: async (line) => JSON.stringify(await bridge.handleRaw(line)),
         payload: {
           protocol: "orchestrator.implementation.v1",
           runId: session.runId,
@@ -136,6 +148,8 @@ export class ClaudeCodeAgent implements ImplementationAgent {
       outcome = await handle.wait();
     } finally {
       unsubscribe();
+      // No request may be served after the process has ended.
+      bridge.close();
     }
 
     if (outcome.result.status === "launch_failed") {
@@ -195,6 +209,7 @@ export class ClaudeCodeAgent implements ImplementationAgent {
       files: claimed?.files ?? [],
       claimsSuccess: claimed?.claimsSuccess ?? false,
       notes: [
+        `tool requests handled by the orchestrator: ${bridge.requestsHandled}`,
         `process ${outcome.result.status}` +
           (outcome.result.exitCode !== null ? ` (exit ${outcome.result.exitCode})` : "") +
           (outcome.result.signal !== null ? ` (signal ${outcome.result.signal})` : ""),

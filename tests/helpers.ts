@@ -10,8 +10,27 @@ export function tmpDir(prefix: string): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
+/**
+ * Remove a temp directory, tolerating Windows file locking.
+ *
+ * A child process launched by the adapter has its cwd INSIDE these directories,
+ * and Windows refuses to delete a directory any process still holds - briefly,
+ * even after that process has exited. Under load the existing 250ms of retries
+ * was not always enough, and teardown started failing tests that had already
+ * passed every assertion.
+ *
+ * So: retry harder, then give up QUIETLY. A leftover temp directory is reclaimed
+ * by the OS and means nothing; failing a suite over it would be reporting a
+ * cleanup detail as a product defect. Anything the test actually cared about has
+ * already been asserted by this point.
+ */
 export function rmDir(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EPERM" && code !== "EBUSY" && code !== "ENOTEMPTY") throw error;
+  }
 }
 
 /**
