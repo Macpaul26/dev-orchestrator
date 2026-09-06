@@ -1,6 +1,8 @@
 import { Annotation } from "@langchain/langgraph";
 import type { Plan, HumanDecision } from "../domain/approval.js";
-import type { ImplementationReport, ReviewReport } from "../domain/reports.js";
+import type { ImplementationReport, ReviewReport, CheckResult } from "../domain/reports.js";
+import type { RepositoryEvidence, InspectionFailure } from "../domain/repository.js";
+import type { ReviewEvidence } from "../domain/evidence.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
 
 /**
@@ -22,10 +24,24 @@ export const OrchestratorState = Annotation.Root({
   intent: Annotation<string>({ reducer: (_p, n) => n, default: () => "" }),
 
   // ---- inspect ------------------------------------------------------------
-  /** Read-only observations. Phase 1+2 records project metadata only. */
+  /** Human-readable observation lines, appended as the run progresses. */
   observations: Annotation<string[]>({
     reducer: (prev, next) => [...prev, ...next],
     default: () => [],
+  }),
+  /**
+   * The PRE-IMPLEMENTATION repository snapshot, from `inspect`.
+   *
+   * Named `repository`, not `inspect` - LangGraph forbids a channel sharing a
+   * node's name. This is the baseline `verify` measures against: without it, a
+   * repository that was already dirty would read as work this run performed.
+   */
+  repository: Annotation<RepositoryEvidence | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /** Set when inspection could not be completed. Never silently absent. */
+  inspectionFailure: Annotation<InspectionFailure | null>({
+    reducer: (_p, n) => n, default: () => null,
   }),
 
   // ---- plan / approval ----------------------------------------------------
@@ -49,6 +65,20 @@ export const OrchestratorState = Annotation.Root({
   }),
   reviewReport: Annotation<ReviewReport | null>({
     reducer: (_p, n) => n, default: () => null,
+  }),
+  /** Deterministic claimed-vs-observed evidence produced by `verify`. */
+  reviewEvidence: Annotation<ReviewEvidence | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /**
+   * Results for the project's declared checks.
+   *
+   * Every entry carries `executed: false` in this phase - check execution is
+   * disabled. The channel exists so a skipped check is recorded explicitly
+   * rather than being absent and looking like it was never declared.
+   */
+  checkResults: Annotation<CheckResult[]>({
+    reducer: (_p, n) => n, default: () => [],
   }),
 
   // ---- control ------------------------------------------------------------

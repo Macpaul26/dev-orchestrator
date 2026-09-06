@@ -13,22 +13,42 @@ It is not tied to any one project. A project is a configuration directory under
 
 > The coding agent's report is never authoritative.
 
-When implementation is eventually delegated, the orchestrator inspects git state
-and runs project-declared checks itself. "The agent says it is done" is evidence
-for review, never proof of completion. `ImplementationReport` keeps `claimed*`
-and `observed*` fields separate so the two can never be quietly conflated.
+The orchestrator inspects git state for itself. "The agent says it is done" is
+evidence for review, never proof of completion. `ImplementationReport` keeps
+`claimed*` and `observed*` fields separate, and there is no code path that
+writes a claim into an observation.
+
+The corollary, and the reason repository inspection came before any
+implementation capability:
+
+> **Observe independently first. Act later.**
 
 ## Current status
 
-**Phase 1+2 is implemented: the foundation and durable human-in-the-loop.**
+**Phase 3 is implemented: secure, read-only repository intelligence.**
 
-The workflow, state model, checkpointing, approval interrupts and project store
-are real. Implementation capability is not: there is no coding agent, no model
-call, no GitHub access, and no way for this system to modify a repository.
+Real: the workflow, checkpointing, approval interrupts, project store, the
+filesystem security boundary, read-only git inspection, independent
+claimed-vs-observed verification, and deterministic scope-drift detection.
 
-See [docs/PHASE-1-2.md](docs/PHASE-1-2.md) for what exists and what does not,
-and [docs/ARCHITECTURE-PROPOSAL.md](docs/ARCHITECTURE-PROPOSAL.md) for the
-overall design.
+Not real, deliberately: there is no coding agent, no model call, no GitHub
+access, no shell execution, no check execution, and **no way for this system to
+modify a repository**.
+
+```
+$ node dist/cli/index.js tools
+write capabilities registered: false
+shell execution available: false
+check execution enabled: false
+```
+
+Tests assert each of those.
+
+| Document | Covers |
+| --- | --- |
+| [docs/PHASE-3.md](docs/PHASE-3.md) | Repository inspection, the security boundary, symlink handling, sensitive-file policy, scope semantics, evidence provenance |
+| [docs/PHASE-1-2.md](docs/PHASE-1-2.md) | The workflow, durable resume, the approval invariant |
+| [docs/ARCHITECTURE-PROPOSAL.md](docs/ARCHITECTURE-PROPOSAL.md) | The overall design |
 
 ## Quick start
 
@@ -36,11 +56,29 @@ overall design.
 npm install
 npm run build
 
+# workingDir is the security boundary. Nothing outside it can be read.
 node dist/cli/index.js project:create --id my-app --name "My App" --dir /path/to/repo
+
+# One read-only inspection pass.
+node dist/cli/index.js inspect --project my-app
+
 node dist/cli/index.js start --project my-app --request "Describe the change"
 node dist/cli/index.js runs
 node dist/cli/index.js resume --run <runId> --decision approve
 ```
+
+## Security posture
+
+| Control | State |
+| --- | --- |
+| Path containment | Lexical **and** physical - symlinks and Windows junctions resolved before the check |
+| Repository writes | None. No write method exists on any interface. |
+| Git | Read-only allowlist; every mutating subcommand rejected |
+| Shell | None. `spawnSync` with `shell: false` and an argv array; `git` is the only executable. |
+| Secrets in the child environment | None. The environment is built, not inherited. |
+| Secrets in state / checkpoints / history | Sensitive files are reported by name; contents are never captured. |
+| Write-capable tools | None registered. Asserted by test. |
+| Model calls | None. No API key is read or required. |
 
 ## Scripts
 

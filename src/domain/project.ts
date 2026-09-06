@@ -25,6 +25,18 @@ export const Project = z.object({
   name: z.string().min(1),
   /** Absolute path to the working copy. All file access is contained here. */
   workingDir: z.string().min(1),
+  /**
+   * OPTIONAL, EXPLICIT widening of the security boundary.
+   *
+   * By default `workingDir` IS the boundary: if the git repository extends
+   * above it, inspection still stops at `workingDir` and records that it saw
+   * only part of the repository. Scope is never widened silently.
+   *
+   * Setting `repoRoot` is the only way to inspect above `workingDir`, it must
+   * be an absolute path that CONTAINS `workingDir`, and it is a human editing
+   * project.json - no workflow node and no model can set it.
+   */
+  repoRoot: z.string().nullish(),
   repo: RepoRef.nullish(),
   /** Verification commands. The allowlist - the only shell the system may run. */
   checks: z.array(CheckDefinition).default([]),

@@ -2,6 +2,8 @@ import type { ProjectStore } from "../projects/projectStore.js";
 import type { OrchestratorEvent } from "../events/types.js";
 import type { ApprovalRequest, HumanDecision } from "../domain/approval.js";
 import type { OrchestratorStateType } from "./state.js";
+import type { RepositoryInspector } from "../domain/inspector.js";
+import type { CheckRunner } from "../verification/checks.js";
 
 /**
  * Side-effect surface available to nodes.
@@ -12,6 +14,14 @@ import type { OrchestratorStateType } from "./state.js";
  */
 export interface NodeContext {
   store: ProjectStore;
+  /**
+   * Read-only view of the project's repository, or null when the project has
+   * no inspectable working directory. Nodes depend on this INTERFACE, never on
+   * git - which is what keeps command construction out of the graph.
+   */
+  inspector: RepositoryInspector | null;
+  /** Project-declared checks. Disabled in this phase; see verification/checks.ts. */
+  checkRunner: CheckRunner;
   emit(event: OrchestratorEvent): void;
   onApprovalRequested(request: ApprovalRequest): void;
   onApprovalReceived(decision: HumanDecision): void;

@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { gateFor, type RiskLevel, type RiskGate } from "../domain/risk.js";
+import type { RepositoryInspector } from "../domain/inspector.js";
+import { repositoryTools } from "./repositoryTools.js";
 
 /**
  * A typed tool definition.
@@ -43,20 +45,24 @@ export class ToolRegistry {
     return gateFor(tool.risk);
   }
 
-  /** Phase 1+2 guarantee: nothing that can modify a repository is registered. */
+  /** Standing guarantee: nothing that can modify a repository is registered. */
   hasWriteCapability(): boolean {
     return this.list().some((t) => !t.readOnly);
   }
 }
 
 /**
- * The Phase 1+2 registry.
+ * The registry.
  *
- * Deliberately contains only LOW-risk, read-only introspection. No filesystem
- * tool, no git tool, no GitHub tool, no shell. Those arrive with the phases
- * that need them, each carrying its own static risk classification.
+ * Phase 3 adds repository INSPECTION - reading a repository's real state - and
+ * nothing else. Every tool registered below is read-only and LOW risk. There is
+ * still no filesystem write tool, no git mutation tool, no GitHub tool and no
+ * shell tool, and `hasWriteCapability()` still returns false.
+ *
+ * Repository tools appear only when an inspector is supplied, so a registry
+ * built without a project (`createRegistry()`) exposes introspection alone.
  */
-export function createRegistry(): ToolRegistry {
+export function createRegistry(inspector?: RepositoryInspector): ToolRegistry {
   const registry = new ToolRegistry();
 
   registry.register({
@@ -66,9 +72,19 @@ export function createRegistry(): ToolRegistry {
     risk: "LOW",
     readOnly: true,
     async run() {
-      return { phase: "1+2", writeCapabilities: false };
+      return {
+        phase: "3",
+        writeCapabilities: false,
+        repositoryInspection: inspector !== undefined,
+        checkExecution: false,
+        shellExecution: false,
+      };
     },
   });
+
+  if (inspector) {
+    for (const tool of repositoryTools(inspector)) registry.register(tool);
+  }
 
   return registry;
 }

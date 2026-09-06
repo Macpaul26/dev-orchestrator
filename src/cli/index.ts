@@ -6,12 +6,16 @@ import { WorkflowRunner } from "../graph/runner.js";
 import { HumanDecision, Plan, type HumanDecisionKind } from "../domain/approval.js";
 import { createRegistry } from "../tools/registry.js";
 import { EventLog } from "../events/log.js";
-import { renderApproval, renderRun, renderRuns, line } from "./render.js";
+import { renderApproval, renderRun, renderRuns, renderInspection, line } from "./render.js";
+import { createInspectorForProject } from "../adapters/repository/index.js";
 
 const program = new CliCommand();
 program
   .name("dev-agent")
-  .description("AI Development Orchestrator (Phase 1+2 - walking graph, no coding agent)")
+  .description(
+    "AI Development Orchestrator (Phase 3 - read-only repository intelligence; " +
+    "no coding agent, no repository writes)",
+  )
   .version("0.1.0");
 
 const store = new ProjectStore();
@@ -23,11 +27,16 @@ program
   .requiredOption("--id <id>", "kebab-case project id")
   .requiredOption("--name <name>", "display name")
   .requiredOption("--dir <dir>", "absolute path to the working copy")
-  .action((opts: { id: string; name: string; dir: string }) => {
+  .option(
+    "--repo-root <dir>",
+    "EXPLICITLY widen the security boundary to this directory (must contain --dir)",
+  )
+  .action((opts: { id: string; name: string; dir: string; repoRoot?: string }) => {
     const project = store.createProject({
       id: opts.id,
       name: opts.name,
       workingDir: path.resolve(opts.dir),
+      repoRoot: opts.repoRoot ? path.resolve(opts.repoRoot) : null,
       repo: null,
       checks: [],
       constraints: [],
@@ -138,17 +147,37 @@ program
     for (const event of log.read()) line(JSON.stringify(event));
   });
 
+// ---------------------------------------------------------------- inspect ----
+program
+  .command("inspect")
+  .description("Run one read-only repository inspection for a project and print it")
+  .requiredOption("--project <id>")
+  .action(async (opts: { project: string }) => {
+    const project = store.getProject(opts.project);
+    if (!project) { line(`unknown project ${opts.project}`); process.exitCode = 1; return; }
+    const outcome = await createInspectorForProject(project).inspect();
+    renderInspection(outcome);
+    if (!outcome.ok) process.exitCode = 1;
+  });
+
 // ------------------------------------------------------------------ tools ----
 program
   .command("tools")
   .description("List registered tools and their static risk")
-  .action(() => {
-    const registry = createRegistry();
+  .option("--project <id>", "include the repository tools bound to this project")
+  .action((opts: { project?: string }) => {
+    const project = opts.project ? store.getProject(opts.project) : null;
+    const registry = createRegistry(
+      project ? createInspectorForProject(project) : undefined,
+    );
     for (const tool of registry.list()) {
-      line(`${tool.name.padEnd(28)} ${tool.risk.padEnd(7)} ${registry.gate(tool.name)}`);
+      const access = tool.readOnly ? "read-only" : "WRITE";
+      line(`${tool.name.padEnd(24)} ${tool.risk.padEnd(6)} ${access.padEnd(10)} ${registry.gate(tool.name)}`);
     }
     line("");
     line(`write capabilities registered: ${registry.hasWriteCapability()}`);
+    line("shell execution available: false");
+    line("check execution enabled: false");
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {

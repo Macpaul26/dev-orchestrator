@@ -49,6 +49,17 @@ export const CheckResult = z.object({
   durationMs: z.number().nonnegative().default(0),
   /** Truncated output. Never contains environment values. */
   output: z.string().default(""),
+  /**
+   * Did this check actually run?
+   *
+   * Without this field a check that was never executed is indistinguishable
+   * from one that ran and failed - both would read `passed: false`. Check
+   * execution is DISABLED (see verification/checks.ts), so everything the
+   * orchestrator produces today carries `executed: false`, and nothing may
+   * claim otherwise.
+   */
+  executed: z.boolean().default(false),
+  skippedReason: z.string().nullable().default(null),
 });
 export type CheckResult = z.infer<typeof CheckResult>;
 

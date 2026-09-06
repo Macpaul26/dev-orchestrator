@@ -8,6 +8,7 @@ import {
   type HumanDecision as THumanDecision,
 } from "../../domain/approval.js";
 import { ImplementationReport, ReviewReport } from "../../domain/reports.js";
+import { RepositoryVerifier } from "../../verification/verifier.js";
 import type { OrchestratorStateType, OrchestratorUpdate } from "../state.js";
 import type { NodeContext } from "../context.js";
 import { now } from "../../events/log.js";
@@ -15,12 +16,49 @@ import { now } from "../../events/log.js";
 /**
  * The nine workflow nodes.
  *
- * PHASE 1+2 SCOPE: every node except the two approval gates is a deterministic
- * stub. There are no model calls, no coding agent, and no repository writes.
- * What is real here is the graph, the state flow, the checkpointing, and the
- * human-in-the-loop interrupts - which is exactly what this phase exists to
- * prove.
+ * SCOPE AFTER PHASE 3:
+ *
+ *   understand      deterministic stub
+ *   inspect         REAL - read-only repository inspection
+ *   plan            deterministic stub
+ *   approve_plan    REAL - human gate (LangGraph interrupt)
+ *   implement       stub - THERE IS NO CODING AGENT. Nothing is modified.
+ *   verify          REAL - re-inspects and derives observed* evidence
+ *   review          REAL - deterministic evidence, not an AI reviewer
+ *   approve_review  REAL - human gate
+ *   update_state    deterministic
+ *
+ * There are still no model calls and no repository writes anywhere in this file.
  */
+
+/**
+ * A COMPACT repository summary for an approval payload.
+ *
+ * Counts and identifiers only. The full evidence - including diff text - stays
+ * in workflow state; the approval request is written into the run record, which
+ * a human reads, so it must stay small and must never carry file contents.
+ */
+function repositorySummary(state: OrchestratorStateType): Record<string, unknown> {
+  if (state.inspectionFailure) {
+    return {
+      inspected: false,
+      failureCode: state.inspectionFailure.code,
+      failure: state.inspectionFailure.message,
+    };
+  }
+  const repo = state.repository;
+  if (!repo) return { inspected: false, failureCode: null, failure: "no inspector configured" };
+  return {
+    inspected: true,
+    branch: repo.branch,
+    headCommit: repo.headCommit,
+    clean: repo.clean,
+    changedFileCount: repo.changedFiles.length,
+    trackedFileCount: repo.trackedFileCount,
+    repositoryRootWithinBoundary: repo.repositoryRootWithinBoundary,
+    sensitiveFilesExcludedFromDiff: repo.diff?.excludedFiles.length ?? 0,
+  };
+}
 
 // 1 ---------------------------------------------------------------- understand
 export const understand = (ctx: NodeContext) =>
@@ -33,24 +71,70 @@ export const understand = (ctx: NodeContext) =>
   };
 
 // 2 ------------------------------------------------------------------- inspect
+/**
+ * READ-ONLY REPOSITORY INSPECTION.
+ *
+ * The baseline snapshot. Two things make it worth the effort:
+ *   - a plan can be made against what the repository ACTUALLY contains;
+ *   - `verify` later has something to measure against, so a repository that was
+ *     already dirty is not mistaken for work this run performed.
+ *
+ * Failure is recorded, never swallowed. The run continues to the plan gate -
+ * inspection is not the point of the run - but `inspectionFailure` is set, the
+ * failure is written to the event history, and the human sees it at the gate.
+ * Nothing downstream may treat an incomplete pass as a clean repository.
+ */
 export const inspect = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "inspect", at: now() });
 
-    // Read-only, and only metadata the project store already holds. No
-    // repository reads and no shell in this phase.
     const project = ctx.store.getProject(state.projectId);
     const observations = project
       ? [
           `project: ${project.name} (${project.id})`,
           `workingDir: ${project.workingDir}`,
-          `checks declared: ${project.checks.length}`,
+          `checks declared: ${project.checks.length} (execution disabled)`,
           `constraints: ${project.constraints.length}`,
         ]
       : [`project ${state.projectId} not found in store`];
 
+    if (!ctx.inspector) {
+      observations.push("repository inspection unavailable: no inspector configured");
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "inspect", at: now() });
+      return { observations, phase: "plan" };
+    }
+
+    const outcome = await ctx.inspector.inspect();
+
+    if (!outcome.ok) {
+      ctx.emit({
+        type: "repository_inspection_failed", runId: state.runId, node: "inspect",
+        code: outcome.failure.code, reason: outcome.failure.message, at: now(),
+      });
+      observations.push(
+        `repository inspection FAILED (${outcome.failure.code}): ${outcome.failure.message}`,
+      );
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "inspect", at: now() });
+      return { observations, inspectionFailure: outcome.failure, repository: null, phase: "plan" };
+    }
+
+    const evidence = outcome.evidence;
+    ctx.emit({
+      type: "repository_inspected", runId: state.runId, node: "inspect",
+      branch: evidence.branch, headCommit: evidence.headCommit,
+      clean: evidence.clean, changedFileCount: evidence.changedFiles.length, at: now(),
+    });
+
+    observations.push(
+      `branch: ${evidence.branch ?? "(detached)"}`,
+      `head: ${evidence.headCommit ?? "(no commits)"}`,
+      `working tree: ${evidence.clean ? "clean" : `${evidence.changedFiles.length} changed file(s)`}`,
+      `tracked files: ${evidence.trackedFileCount}${evidence.trackedFilesTruncated ? "+" : ""}`,
+      ...evidence.notes.map((note) => `note: ${note}`),
+    );
+
     ctx.emit({ type: "node_completed", runId: state.runId, node: "inspect", at: now() });
-    return { observations, phase: "plan" };
+    return { observations, repository: evidence, inspectionFailure: null, phase: "plan" };
   };
 
 // 3 ---------------------------------------------------------------------- plan
@@ -98,7 +182,8 @@ export const approvePlan = (ctx: NodeContext) =>
       summary: state.proposedPlan?.summary ?? "(no plan)",
       risk: state.proposedPlan?.highestRisk ?? "LOW",
       proposedPlan: state.proposedPlan,
-      payload: {},
+      // What the human is shown about the repository they are authorising work on.
+      payload: { repository: repositorySummary(state) },
       createdAt: now(),
     });
 
@@ -163,31 +248,146 @@ export const implement = (ctx: NodeContext) =>
   };
 
 // 6 -------------------------------------------------------------------- verify
+/**
+ * INDEPENDENT VERIFICATION.
+ *
+ * Re-inspects the repository and derives `observed*` from what git actually
+ * reports, comparing it against the baseline captured by `inspect`.
+ *
+ * The claimed/observed separation is absolute here: `claimedSummary` and
+ * `claimedFiles` are passed through untouched, and NOTHING from them is ever
+ * written into an observed field. If inspection fails, observed stays empty and
+ * `verifiedIndependently` stays false - there is no fallback that fills in the
+ * gap with what an agent said.
+ *
+ * Declared checks are recorded, not executed. See verification/checks.ts.
+ */
 export const verify = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "verify", at: now() });
-    // Independent git inspection and check execution belong to a later phase.
+
+    const project = ctx.store.getProject(state.projectId);
+    const declaredChecks = project?.checks ?? [];
+    // Disabled runner: results carry executed:false, so a skipped check can
+    // never be mistaken for a passing one.
+    const checkResults = await ctx.checkRunner.runAll(declaredChecks);
+    const executed = checkResults.filter((r) => r.executed).length;
+
+    if (!ctx.inspector) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "verify", at: now() });
+      return { phase: "review" };
+    }
+
+    const verifier = new RepositoryVerifier(ctx.inspector);
+    const result = await verifier.verify({
+      runId: state.runId,
+      // UNTRUSTED inputs, kept strictly on the claimed side.
+      claimedSummary: state.implementation?.claimedSummary ?? "",
+      claimedFiles: state.implementation?.claimedFiles ?? [],
+      baseline: state.repository,
+      allowedScope: state.proposedPlan?.allowedScope ?? [],
+      checksDeclared: declaredChecks.length,
+      checksExecuted: executed,
+    });
+
+    if (result.failure) {
+      ctx.emit({
+        type: "repository_inspection_failed", runId: state.runId, node: "verify",
+        code: result.failure.code, reason: result.failure.message, at: now(),
+      });
+    }
+    ctx.emit({
+      type: "verification_completed", runId: state.runId,
+      verifiedIndependently: result.report.verifiedIndependently,
+      observedFileCount: result.report.observedFiles.length,
+      observedCommitCount: result.report.observedCommits.length,
+      scopeDriftCount: result.evidence.scope.drift.length,
+      at: now(),
+    });
+
     ctx.emit({ type: "node_completed", runId: state.runId, node: "verify", at: now() });
-    return { phase: "review" };
+    return {
+      implementation: result.report,
+      reviewEvidence: result.evidence,
+      checkResults,
+      phase: "review",
+    } as OrchestratorUpdate;
   };
 
 // 7 -------------------------------------------------------------------- review
+/**
+ * DETERMINISTIC REVIEW.
+ *
+ * NOT an AI reviewer - there is no model call here. This node turns the
+ * evidence `verify` collected into findings a human can act on at the second
+ * gate. A later phase can add model-based judgement ON TOP of these facts; it
+ * must not be able to alter them.
+ */
 export const review = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "review", at: now() });
 
+    const evidence = state.reviewEvidence;
+    const findings: { severity: "info" | "warning" | "blocker"; message: string; file?: string }[] = [
+      {
+        severity: "info",
+        message:
+          "No implementation was performed: the orchestrator has no coding agent " +
+          "and no write capability in this phase.",
+      },
+    ];
+
+    if (!evidence || !evidence.inspectionSucceeded) {
+      findings.push({
+        severity: "warning",
+        message:
+          `Repository state could not be independently verified` +
+          `${evidence?.failure ? ` (${evidence.failure.code}: ${evidence.failure.message})` : ""}.`,
+      });
+    }
+
+    for (const file of evidence?.scope.drift ?? []) {
+      findings.push({
+        severity: "blocker",
+        message: "Changed outside the approved scope.",
+        file,
+      });
+    }
+    for (const file of evidence?.claims.claimedButNotObserved ?? []) {
+      findings.push({
+        severity: "warning",
+        message: "Claimed as changed, but git reports no change to it.",
+        file,
+      });
+    }
+    for (const file of evidence?.sensitiveFilesChanged ?? []) {
+      findings.push({
+        severity: "warning",
+        message: "A sensitive file changed. Its contents were deliberately not captured.",
+        file,
+      });
+    }
+    if (evidence && evidence.checksDeclared > evidence.checksExecuted) {
+      findings.push({
+        severity: "info",
+        message:
+          `${evidence.checksDeclared} project check(s) declared, ` +
+          `${evidence.checksExecuted} executed - check execution is disabled.`,
+      });
+    }
+
+    const drift = evidence?.scope.drift ?? [];
+    const verdict =
+      drift.length > 0 ? "changes_requested"
+      : !evidence || !evidence.inspectionSucceeded ? "changes_requested"
+      : "pass";
+
     const report = ReviewReport.parse({
       runId: state.runId,
-      verdict: "pass",
-      findings: [
-        {
-          severity: "info",
-          message:
-            "Phase 1+2 walking graph: no implementation was performed and no checks were run.",
-        },
-      ],
-      checkResults: [],
-      scopeDrift: [],
+      verdict,
+      findings,
+      checkResults: state.checkResults ?? [],
+      scopeDrift: drift,
       createdAt: now(),
     });
 
@@ -215,7 +415,19 @@ export const approveReview = (ctx: NodeContext) =>
       summary: `Review verdict: ${state.reviewReport?.verdict ?? "unknown"}`,
       risk: "HIGH",
       proposedPlan: null,
-      payload: { review: state.reviewReport ?? {} },
+      payload: {
+        review: state.reviewReport ?? {},
+        repository: repositorySummary(state),
+        // The independent-verification headline, so approval is an informed act.
+        verification: {
+          verifiedIndependently: state.implementation?.verifiedIndependently ?? false,
+          observedFileCount: state.implementation?.observedFiles.length ?? 0,
+          observedCommitCount: state.implementation?.observedCommits.length ?? 0,
+          scopeDrift: state.reviewEvidence?.scope.drift ?? [],
+          checksDeclared: state.reviewEvidence?.checksDeclared ?? 0,
+          checksExecuted: state.reviewEvidence?.checksExecuted ?? 0,
+        },
+      },
       createdAt: now(),
     });
 

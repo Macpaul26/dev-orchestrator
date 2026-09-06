@@ -41,6 +41,32 @@ export const OrchestratorEvent = z.discriminatedUnion("type", [
     type: z.literal("workflow_resumed"),
     runId: z.string(), phase: WorkflowPhase, pid: z.number(), at: z.string(),
   }),
+  /**
+   * A completed read-only inspection. Carries COUNTS and identifiers only -
+   * never file contents, never diff text - because this line is appended to an
+   * unencrypted JSONL file that lives for the life of the project.
+   */
+  z.object({
+    type: z.literal("repository_inspected"),
+    runId: z.string(), node: WorkflowPhase,
+    branch: z.string().nullable(), headCommit: z.string().nullable(),
+    clean: z.boolean(), changedFileCount: z.number().int().nonnegative(),
+    at: z.string(),
+  }),
+  /** Inspection could not be completed. Recorded so it can never look clean. */
+  z.object({
+    type: z.literal("repository_inspection_failed"),
+    runId: z.string(), node: WorkflowPhase,
+    code: z.string(), reason: z.string(), at: z.string(),
+  }),
+  z.object({
+    type: z.literal("verification_completed"),
+    runId: z.string(), verifiedIndependently: z.boolean(),
+    observedFileCount: z.number().int().nonnegative(),
+    observedCommitCount: z.number().int().nonnegative(),
+    scopeDriftCount: z.number().int().nonnegative(),
+    at: z.string(),
+  }),
   z.object({
     type: z.literal("workflow_completed"),
     runId: z.string(), outcome: z.string(), at: z.string(),

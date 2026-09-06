@@ -224,12 +224,23 @@ claims to be both `HIGH` risk and read-only.
 
 ## Known limitations
 
+> **Several of these were resolved in Phase 3.** See [PHASE-3.md](PHASE-3.md);
+> this section records the state at the end of Phase 1+2.
+
 - Every node except the two approval gates is a deterministic stub.
+  *(Phase 3: `inspect`, `verify` and `review` are real.)*
 - `inspect` reads project-store metadata only. It does not read the repository.
+  *(Phase 3: real read-only git and filesystem inspection.)*
 - `verify` runs nothing. `project.checks` is modelled but never executed.
+  *(Phase 3: `verify` inspects independently. Check execution is still disabled,
+  now explicitly — see `verification/checks.ts`.)*
 - `ImplementationReport.observed*` is always empty and
   `verifiedIndependently` is always `false` — correct for this phase, since no
   implementation happens and nothing has been observed.
+  *(Phase 3: populated from git; the flag is true only when an observation
+  actually succeeded.)*
+- Path containment is lexical only, so a symlink could resolve outside the root.
+  *(Phase 3: physical containment added; symlink and junction escapes rejected.)*
 - `edit` from the CLI currently only rewrites `allowedScope`. A full editor
   round-trip is CLI polish.
 - One `thread_id` per run; concurrent runs on one thread are not supported.

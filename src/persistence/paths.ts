@@ -30,12 +30,26 @@ export class PathEscapeError extends Error {
 }
 
 /**
- * Resolve a caller-supplied path and PROVE it stays inside `root`.
+ * LEXICAL containment only. Resolve a path and prove it stays inside `root`
+ * on the basis of the path string alone.
  *
- * This is the containment primitive the future tool layer is built on. It is
- * implemented now, with tests, so no later phase has to invent it under time
- * pressure. Rejects `..` traversal, absolute escapes, and (on Windows)
- * cross-drive paths.
+ * Rejects `..` traversal, absolute escapes, and (on Windows) cross-drive paths.
+ *
+ * !! THIS IS NOT SUFFICIENT FOR UNTRUSTED CONTENT. !!
+ *
+ * A symlink - or, on Windows, a directory junction, which any user can create
+ * without privilege - can make a lexically perfect path resolve somewhere else
+ * entirely:
+ *
+ *     project/allowed/link  ->  /somewhere/else
+ *
+ * For anything touching a PROJECT's repository, use `FsBoundary` in
+ * security/fsBoundary.ts, which performs this check AND resolves symlinks
+ * before checking again.
+ *
+ * This function remains in use for the orchestrator's OWN store, where the
+ * root is a directory the orchestrator itself created and the "untrusted"
+ * input is a validated kebab-case project id.
  */
 export function resolveWithin(root: string, requested: string): string {
   const absoluteRoot = path.resolve(root);

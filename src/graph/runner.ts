@@ -16,6 +16,8 @@ import {
   WorkflowRun, newRunId, type WorkflowRun as TWorkflowRun, type WorkflowPhase,
 } from "../domain/workflow.js";
 import { createCheckpointer, closeCheckpointer } from "../persistence/checkpointer.js";
+import { createInspectorForProject } from "../adapters/repository/index.js";
+import { DisabledCheckRunner } from "../verification/checks.js";
 
 export interface RunResult {
   run: TWorkflowRun;
@@ -68,8 +70,17 @@ export class WorkflowRunner {
     captured: { approval: TApprovalRequest | null };
   } {
     const captured: { approval: TApprovalRequest | null } = { approval: null };
+
+    // The inspector is built HERE, from the project record, and handed to the
+    // graph as an interface. Nodes therefore cannot choose what they inspect or
+    // widen their own boundary - the project's workingDir decides both.
+    const project = this.store.getProject(run.projectId);
+
     const ctx: NodeContext = {
       store: this.store,
+      inspector: project ? createInspectorForProject(project) : null,
+      // Declared checks are recorded, never run. See verification/checks.ts.
+      checkRunner: new DisabledCheckRunner(),
       emit: (event: OrchestratorEvent) => { log.append(event); },
       onApprovalRequested: (request) => {
         captured.approval = ApprovalRequest.parse(request);
