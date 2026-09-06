@@ -20,6 +20,7 @@ import {
 } from "../domain/implementation.js";
 import type { ActivityErrorCategory } from "../domain/activity.js";
 import type { ProjectStore } from "../projects/projectStore.js";
+import { orchestratorHome } from "../persistence/paths.js";
 
 /**
  * THE CONTROLLED IMPLEMENTATION RUNNER
@@ -94,6 +95,17 @@ export interface ImplementationRequest {
   instruction: string;
   /** The approved plan summary, for the agent's context. */
   planSummary?: string;
+  /**
+   * The authorised working directory.
+   *
+   * SET BY THE RUNNER. Any value a caller puts here is discarded and replaced
+   * with the project's own `workingDir` before the agent ever sees the request,
+   * so "which directory does the agent get?" is not a question a caller - or an
+   * agent influencing one - can answer.
+   */
+  workingDir?: string;
+  /** Set by the runner. Directories the agent must never be pointed at. */
+  forbiddenDirectories?: readonly string[];
 }
 
 export interface ImplementationRunResult {
@@ -287,9 +299,29 @@ export class ControlledImplementationRunner {
     let failureCategory: ActivityErrorCategory | null = null;
     let failureDetail: string | null = null;
 
+    /**
+     * THE RUNNER OWNS THE WORKING DIRECTORY.
+     *
+     * Whatever a caller put in `request.workingDir` is discarded here and
+     * replaced with the project's own, which is the same path the Phase 4A
+     * boundary was built around. "Which directory does the agent get?" is
+     * therefore not a question any caller can answer, and an agent that
+     * influences a request cannot answer it either.
+     *
+     * `forbiddenDirectories` names the orchestrator's own state, so an agent can
+     * never be pointed at the grants, checkpoints or journals that govern it.
+     */
+    const authorisedRequest: ImplementationRequest = {
+      ...request,
+      workingDir: project.workingDir,
+      forbiddenDirectories: [store.root, orchestratorHome()],
+    };
+
     try {
       if (cancellation.isCancelled) throw new ImplementationCancelled("cancelled before start");
-      agentReport = AgentReport.parse(await agent.implement(session, request, cancellation));
+      agentReport = AgentReport.parse(
+        await agent.implement(session, authorisedRequest, cancellation),
+      );
       // A late cancellation still counts: work may have landed before it.
       if (cancellation.isCancelled) throw new ImplementationCancelled("cancelled during implementation");
     } catch (error) {

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Capability } from "./capability.js";
 import { DenialReason } from "./denial.js";
+import { AgentProcessStatus, AgentLaunchFailure } from "./agentProcess.js";
 
 /**
  * THE ACTIVITY JOURNAL
@@ -177,6 +178,62 @@ export const ActivityRecord = z.discriminatedUnion("type", [
     ...base,
     reason: DenialReason,
     detail: z.string(),
+  }),
+  /**
+   * AGENT PROCESS BOUNDARY (Phase 4B.1).
+   *
+   * Metadata only, and deliberately so: an agent authors its own stdout, so
+   * none of it appears here. What is recorded came from the operating system -
+   * a pid, an exit code, a signal - or from the orchestrator's own decisions.
+   */
+  z.object({
+    type: z.literal("agent_launch_attempted"),
+    ...base,
+    agent: z.string(),
+    /** Basename only. The full path is orchestrator configuration. */
+    executable: z.string(),
+  }),
+  z.object({
+    type: z.literal("agent_started"),
+    ...base,
+    agent: z.string(),
+    pid: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("agent_exited"),
+    ...base,
+    agent: z.string(),
+    status: AgentProcessStatus,
+    exitCode: z.number().int().nullable().default(null),
+    signal: z.string().nullable().default(null),
+    durationMs: z.number().int().nonnegative().default(0),
+    /** Byte counts describe the output without reproducing any of it. */
+    stdoutBytes: z.number().int().nonnegative().default(0),
+    stderrBytes: z.number().int().nonnegative().default(0),
+    outputTruncated: z.boolean().default(false),
+  }),
+  z.object({
+    type: z.literal("agent_launch_failed"),
+    ...base,
+    agent: z.string(),
+    failure: AgentLaunchFailure,
+    /** Adapter-authored. Never an agent message or an OS error buffer. */
+    detail: z.string(),
+  }),
+  z.object({
+    type: z.literal("agent_termination_requested"),
+    ...base,
+    agent: z.string(),
+    pid: z.number().int().nonnegative().nullable().default(null),
+    reason: z.string(),
+  }),
+  z.object({
+    type: z.literal("agent_terminated"),
+    ...base,
+    agent: z.string(),
+    status: AgentProcessStatus,
+    /** True when SIGTERM was ignored and the process had to be killed. */
+    forciblyKilled: z.boolean().default(false),
   }),
   z.object({ type: z.literal("lock_acquired"), ...base, holder: z.string() }),
   z.object({ type: z.literal("lock_released"), ...base }),

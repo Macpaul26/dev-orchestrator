@@ -25,6 +25,17 @@ implementation capability:
 
 ## Current status
 
+**Phase 4B.1 is implemented: the controlled Claude Code process boundary.**
+
+Claude Code can now be launched as an untrusted implementation agent behind a
+controlled adapter — fixed executable from trusted configuration, no shell, a
+built environment carrying no credentials, and a bounded working directory. It
+receives **no repository tools**; that bridge is 4B.2. Its output is a claim, and
+repository state is still established by independent inspection.
+
+**This is not a sandbox.** The child is an ordinary OS process with the launching
+user's privileges. See [docs/PHASE-4B1.md](docs/PHASE-4B1.md) for what that means.
+
 **Phase 4A is implemented: the controlled-hands foundation.**
 
 Real: the workflow, checkpointing, approval interrupts, project store, the
@@ -50,6 +61,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-4B1.md](docs/PHASE-4B1.md) | The Claude Code adapter, the process boundary, environment isolation, output provenance, cancellation — and precisely what the boundary does *not* protect |
 | [docs/PHASE-4A.md](docs/PHASE-4A.md) | The capability model, implementation grants, the write boundary, the activity journal, cancellation, process death, concurrency, and why Claude Code is not integrated yet |
 | [docs/PHASE-3.md](docs/PHASE-3.md) | Repository inspection, the security boundary, symlink handling, sensitive-file policy, scope semantics, evidence provenance |
 | [docs/PHASE-1-2.md](docs/PHASE-1-2.md) | The workflow, durable resume, the approval invariant |
@@ -86,6 +98,7 @@ node dist/cli/index.js resume --run <runId> --decision approve
 | Write-capable tools | Only from a human-approved grant, bound to one run and one scope. None otherwise; asserted by test. |
 | Capability escalation | The session uses native `#` private fields; the grant is deep-frozen. No cast reaches the unchecked writer, the grant, or the journal. |
 | Concurrent mutation | Project-level lock, atomically acquired. A stale lock fails closed and needs a human. |
+| Agent process | Untrusted. Fixed executable, `shell: false`, built environment with no credentials, bounded cwd, terminable. Spawning stays confined to two enumerated adapters. |
 | Rollback | **None, and none claimed.** Every non-clean terminal state keeps `partialChangesPossible`, and verification always runs. |
 | Model calls | None. No API key is read or required. |
 

@@ -57,15 +57,55 @@ export interface WriteResult {
   detail: string | null;
 }
 
-/** Cooperative cancellation. Checked before every capability use. */
+/**
+ * Cooperative cancellation, checked before every capability use.
+ *
+ * Cooperative is enough for an in-process agent: it cannot write without asking,
+ * and the flag is checked on every ask. It is NOT enough for a CHILD PROCESS,
+ * which keeps running whether or not anyone polls a boolean - so listeners exist
+ * for holders that must take real action, like sending a signal.
+ *
+ * Listeners are best-effort and cannot veto cancellation: a listener that throws
+ * is ignored, because a badly-written one must not be able to keep a run alive.
+ */
 export class CancellationToken {
   private cancelled = false;
   private reason: string | null = null;
+  private readonly listeners = new Set<(reason: string) => void>();
 
   cancel(reason = "cancelled"): void {
+    if (this.cancelled) return; // idempotent; listeners fire exactly once
     this.cancelled = true;
     this.reason = reason;
+    for (const listener of this.listeners) {
+      try {
+        listener(reason);
+      } catch {
+        // A listener cannot prevent cancellation.
+      }
+    }
   }
+
+  /**
+   * Run `listener` when cancellation happens - or immediately, if it already
+   * has. The immediate call closes the race where a holder subscribes just
+   * after cancellation and would otherwise never hear about it.
+   *
+   * @returns an unsubscribe function.
+   */
+  onCancel(listener: (reason: string) => void): () => void {
+    if (this.cancelled) {
+      try {
+        listener(this.reason ?? "cancelled");
+      } catch {
+        // As above.
+      }
+      return () => undefined;
+    }
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   get isCancelled(): boolean {
     return this.cancelled;
   }

@@ -39,7 +39,12 @@ import {
  * and editable by hand. Entirely independent of the LangGraph checkpoint DB.
  */
 export class ProjectStore {
-  constructor(private readonly root: string = projectsRoot()) {
+  /**
+   * Readable so the runner can name it as a directory the agent must never be
+   * pointed at. Exposing the path is not exposing the contents - nothing an
+   * agent can reach accepts a path from here.
+   */
+  constructor(readonly root: string = projectsRoot()) {
     fs.mkdirSync(this.root, { recursive: true });
   }
 

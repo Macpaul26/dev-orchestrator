@@ -7,6 +7,7 @@ import { HumanDecision, Plan, type HumanDecisionKind } from "../domain/approval.
 import { createRegistry, describeCapabilities } from "../tools/registry.js";
 import { ImplementationLock } from "../implementation/lock.js";
 import { ActivityJournal } from "../activity/journal.js";
+import { configFromEnvironment, ENV_EXECUTABLE } from "../adapters/claude-code/config.js";
 import { EventLog } from "../events/log.js";
 import { renderApproval, renderRun, renderRuns, renderInspection, line } from "./render.js";
 import { createInspectorForProject } from "../adapters/repository/index.js";
@@ -15,8 +16,9 @@ const program = new CliCommand();
 program
   .name("dev-agent")
   .description(
-    "AI Development Orchestrator (Phase 4A - bounded, human-granted repository " +
-    "writes; no coding agent, no shell, no git mutation, no network)",
+    "AI Development Orchestrator (Phase 4B.1 - bounded, human-granted repository " +
+    "writes plus a controlled Claude Code process boundary; no shell, no git " +
+    "mutation, no network, no repository tools for the agent)",
   )
   .version("0.1.0");
 
@@ -257,8 +259,30 @@ program
     line("process execution available: false");
     line("git mutation available: false");
     line("network access available: false");
-    line("coding agent connected: false");
     line("check execution enabled: false");
+    line("");
+    line("AGENT PROCESS BOUNDARY (Phase 4B.1)");
+    let adapter: ReturnType<typeof configFromEnvironment> = null;
+    let adapterError: string | null = null;
+    try {
+      adapter = configFromEnvironment();
+    } catch (error) {
+      adapterError = error instanceof Error ? error.message : String(error);
+    }
+    if (adapterError) {
+      line(`  claude code adapter: MISCONFIGURED - ${adapterError}`);
+    } else if (!adapter) {
+      line("  claude code adapter: not configured (no agent can be launched)");
+      line(`  configure with ${ENV_EXECUTABLE}=<absolute path>`);
+    } else {
+      line("  claude code adapter: configured");
+      line(`  environment allowlist: ${adapter.environmentAllowlist.length === 0
+        ? "(empty - no credentials are passed to the agent)"
+        : adapter.environmentAllowlist.join(", ")}`);
+      line(`  output retained in records: ${adapter.retainOutputExcerpt}`);
+    }
+    line("  the agent is UNTRUSTED; its claims are never observations");
+    line("  launching it is not a capability - `process.execute` stays unavailable");
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {

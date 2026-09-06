@@ -252,7 +252,21 @@ describe("the protection does not break diff", () => {
 });
 
 describe("no second process-spawn site was introduced", () => {
-  it("keeps spawning confined to gitExec.ts", () => {
+  /**
+   * THE CANONICAL PROCESS-SPAWN INVENTORY.
+   *
+   * Phase 3 asserted exactly one spawn site. Phase 4B.1 deliberately adds a
+   * second - the Claude Code process boundary - so this assertion is UPDATED,
+   * not relaxed: the set stays exact, stays small, and stays enumerated here, so
+   * a third site cannot appear without someone editing this list and saying why.
+   *
+   * The two are different in kind:
+   *   gitExec            runs a program we trust, with arguments we build, and
+   *                      constrains which subcommands are even possible.
+   *   processBoundary    runs a program we do NOT trust, and constrains what it
+   *                      is handed and what is believed afterwards.
+   */
+  it("keeps spawning confined to the two enumerated adapters", () => {
     const root = path.resolve(__dirname, "..", "src");
     const offenders: string[] = [];
 
@@ -271,16 +285,27 @@ describe("no second process-spawn site was introduced", () => {
     };
     walk(root);
 
-    expect(offenders).toEqual(["adapters/repository/gitExec.ts"]);
+    expect(offenders.sort()).toEqual([
+      "adapters/claude-code/processBoundary.ts",
+      "adapters/repository/gitExec.ts",
+    ]);
   });
 
-  it("uses exactly one spawn call, with shell disabled", () => {
-    const source = fs.readFileSync(
-      path.resolve(__dirname, "..", "src", "adapters", "repository", "gitExec.ts"),
-      "utf8",
-    );
-    expect(source.match(/spawnSync\(/g)).toHaveLength(1);
-    expect(source).toContain("shell: false");
+  it("uses exactly one spawn call in each adapter, with shell disabled in both", () => {
+    const adapters = [
+      ["repository", "gitExec.ts", "spawnSync"],
+      ["claude-code", "processBoundary.ts", "spawn"],
+    ] as const;
+
+    for (const [dir, file, fn] of adapters) {
+      const source = fs.readFileSync(
+        path.resolve(__dirname, "..", "src", "adapters", dir, file),
+        "utf8",
+      );
+      expect(source.match(new RegExp(`\\b${fn}\\(`, "g")), `${file}`).toHaveLength(1);
+      expect(source, `${file}`).toContain("shell: false");
+      expect(source, `${file}`).not.toMatch(/shell:\s*true/);
+    }
   });
 
   it("never lets GIT_EXTERNAL_DIFF reach the child, because the env is a whitelist", () => {

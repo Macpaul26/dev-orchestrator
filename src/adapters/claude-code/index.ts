@@ -1,36 +1,28 @@
-import type { Plan } from "../../domain/approval.js";
-import type { ImplementationReport } from "../../domain/reports.js";
-
 /**
- * Boundary for the coding agent. INTENTIONALLY UNIMPLEMENTED IN PHASE 1+2.
+ * CLAUDE CODE ADAPTER (Phase 4B.1)
  *
- * The implementation will use `@anthropic-ai/claude-agent-sdk` (Claude Code as
- * a library - not the API Tool Runner, which is a different package with no
- * filesystem access). The interface is declared now so the graph's `implement`
- * node has a shape to depend on, and so this phase provably contains no path
- * that can execute a coding agent.
+ * Replaces the Phase 1+2 `CodingAgent` placeholder, which declared a shape
+ * before there was a lifecycle to hang it on. The live contract is Phase 4A's
+ * `ImplementationAgent`, so this adapter implements that rather than carrying a
+ * second, competing notion of what an agent is.
+ *
+ * The standing statement about this integration:
+ *
+ *   > Claude Code is an untrusted implementation agent. Its claims are not
+ *   > observations. Repository state and verification results are established
+ *   > independently by the orchestrator.
+ *
+ * See docs/PHASE-4B1.md for what the boundary actually guarantees - and, just as
+ * importantly, what it does not.
  */
-export interface CodingAgent {
-  /**
-   * Execute an APPROVED plan inside `workingDir`.
-   *
-   * The returned report must leave every `observed*` field empty: populating
-   * those is the orchestrator's job, using its own git inspection. The agent
-   * fills only `claimed*`.
-   */
-  implement(input: {
-    plan: Plan;
-    workingDir: string;
-    runId: string;
-    maxTurns: number;
-    signal: AbortSignal;
-  }): Promise<ImplementationReport>;
-}
-
-export class NotImplementedCodingAgent implements CodingAgent {
-  async implement(): Promise<ImplementationReport> {
-    throw new Error(
-      "No coding agent is available. Claude Code integration is a later phase.",
-    );
-  }
-}
+export { ClaudeCodeAgent } from "./agent.js";
+export {
+  ClaudeCodeConfig, ClaudeCodeConfigError,
+  validateConfig, configFromEnvironment, buildAgentEnvironment,
+  BASE_ENV_PASSTHROUGH, ENV_EXECUTABLE, ENV_ARGS, ENV_ALLOWED_ENV,
+} from "./config.js";
+export {
+  launchAgentProcess, AgentProcessHandle, AgentLaunchRefused,
+  parseClaimedReport, REPORT_MARKER,
+  type AgentProcessOutcome, type AgentRequestPayload, type LaunchOptions,
+} from "./processBoundary.js";
