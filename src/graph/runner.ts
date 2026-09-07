@@ -19,6 +19,8 @@ import { createCheckpointer, closeCheckpointer } from "../persistence/checkpoint
 import { createInspectorForProject } from "../adapters/repository/index.js";
 import { DisabledCheckRunner } from "../verification/checks.js";
 import { VerificationCheckPhase } from "../verification/checkPhase.js";
+import { AnthropicReasoningModel } from "../models/anthropicModel.js";
+import type { ReasoningModel } from "../models/reasoningModel.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 import { ClaudeCodeAgent } from "../adapters/claude-code/agent.js";
 import { configFromEnvironment } from "../adapters/claude-code/config.js";
@@ -59,11 +61,34 @@ export class WorkflowRunner {
   constructor(
     private readonly store: ProjectStore = new ProjectStore(),
     checkpointer?: BaseCheckpointSaver,
-    options: { agent?: ImplementationAgent | null } = {},
+    options: {
+      agent?: ImplementationAgent | null;
+      reasoningModel?: ReasoningModel | null;
+    } = {},
   ) {
     this.ownsCheckpointer = checkpointer === undefined;
     this.checkpointer = checkpointer ?? createCheckpointer();
     this.agent = options.agent ?? null;
+    this.reasoningModel = options.reasoningModel ?? null;
+  }
+
+  private readonly reasoningModel: ReasoningModel | null;
+
+  /**
+   * Build the reasoning model, IF an operator configured one.
+   *
+   * Null when unconfigured, which is the default and means the workflow keeps
+   * its deterministic plan. A misconfiguration yields null rather than throwing,
+   * so a bad model setting cannot take down a workflow - and `dev-agent tools`
+   * reports the state explicitly.
+   */
+  private configuredReasoningModel(): ReasoningModel | null {
+    if (this.reasoningModel) return this.reasoningModel;
+    try {
+      return AnthropicReasoningModel.fromEnvironment();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -118,6 +143,7 @@ export class WorkflowRunner {
       // Declared checks are recorded, never run. See verification/checks.ts.
       checkRunner: new DisabledCheckRunner(),
       checkPhase: new VerificationCheckPhase(),
+      reasoningModel: this.configuredReasoningModel(),
       // Null in production - Phase 4A connects no coding agent. Tests inject a
       // deterministic fake to exercise the capability boundary.
       // An explicitly injected agent wins; otherwise use one the operator

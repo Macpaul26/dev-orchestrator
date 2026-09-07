@@ -33,6 +33,26 @@ grant-bound operations (`read_file`, `list_directory`, `write_file`,
 filesystem API, and the request protocol has no field for a grant, project,
 session, scope or budget, so authority is not something it can name.
 
+**Task 006 is implemented: the controlled reasoning boundary.**
+
+The orchestrator can now use a language model to propose a plan - objectives,
+requirements, scope, verification expectations, risks and open questions -
+instead of the deterministic stub it used before.
+
+The model is **UNTRUSTED and proposes only**. It has no tool, no filesystem, no
+shell, no network and no grant. Its output is size-bounded, strictly
+schema-validated (a response carrying `approved` or `capabilities` is rejected
+in full), and then rebuilt field by field by trusted code that computes risk
+itself and re-checks every proposed path against the real scope rules. A model
+failure yields a zero-scope plan. The human plan gate is unchanged.
+
+**Prompt injection is not solved by prompting**, and the documentation does not
+claim it is - the controls are the schema, the rebuild and the human gate. See
+[docs/PHASE-006.md](docs/PHASE-006.md).
+
+Unconfigured is the default: without `ANTHROPIC_API_KEY` the workflow uses the
+deterministic plan that authorises no scope.
+
 **Task 005 is implemented: controlled verification execution.**
 
 The orchestrator now runs a bounded, explicitly authorised set of project checks
@@ -71,10 +91,11 @@ new in this phase - **bounded repository writes that require a human-approved,
 expiring, scope-bound grant**, an orchestrator-written activity journal, a
 project-level implementation lock, and durable implementation lifecycle state.
 
-Not real, deliberately: no model call, no GitHub access, no arbitrary shell or
-process execution, no git mutation, no network access. Writing requires a grant
-that only a human approval can produce; there is no global "implementation
-enabled" switch anywhere.
+Not real, deliberately: no GitHub access, no arbitrary shell or process
+execution, no git mutation, no autonomous approval. A reasoning model may now be
+configured, but it only ever produces a proposal for a human to read. Writing
+requires a grant that only a human approval can produce; there is no global
+"implementation enabled" switch anywhere.
 
 ```
 $ node dist/cli/index.js tools
@@ -90,6 +111,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-006.md](docs/PHASE-006.md) | The reasoning boundary: why model output is never authority, the strict schema and trusted rebuild, the prompt-injection posture, credential handling, and fail-closed behaviour |
 | [docs/PHASE-005.md](docs/PHASE-005.md) | Controlled verification execution: predefined checks, the trusted policy fingerprint, process bounding, the seven outcomes, post-check inspection, and what is detected rather than prevented |
 | [docs/PHASE-4B3.md](docs/PHASE-4B3.md) | The complete controlled implementation loop: the four-compartment evidence model, git-mutation and sensitive-change detection, and the human review gate |
 | [docs/PHASE-4B2.md](docs/PHASE-4B2.md) | The controlled tool bridge: the four-operation protocol, per-invocation authorisation, path and budget enforcement, protocol hardening, and the hostile-agent tests |

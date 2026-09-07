@@ -8,6 +8,7 @@ import type { ImplementationRun } from "../domain/implementation.js";
 import type { VerificationOutcome } from "../domain/verification.js";
 import type { VerificationCheckRun } from "../domain/verificationCheck.js";
 import type { CheckPolicy } from "../verification/checkPolicy.js";
+import type { ReasoningRecord, ReasoningFailure } from "../domain/reasoning.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
 
 /**
@@ -119,6 +120,23 @@ export const OrchestratorState = Annotation.Root({
    * the agent can write to disk in between. The fingerprint travels with it so
    * a mid-run rewrite is detectable rather than executable.
    */
+  /**
+   * Provenance for the reasoning call. METADATA ONLY.
+   *
+   * No prompt, no raw response, no credential - this goes into a SQLite
+   * checkpoint, and none of those belong there. See domain/reasoning.ts.
+   */
+  reasoning: Annotation<ReasoningRecord | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /** Why reasoning did not produce a plan. Fail-closed evidence, not a plan. */
+  reasoningFailure: Annotation<ReasoningFailure | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /** Model-proposed paths trusted code refused, and why. Shown to the human. */
+  reasoningNotes: Annotation<string[]>({
+    reducer: (_p, n) => n, default: () => [],
+  }),
   checkPolicy: Annotation<CheckPolicy | null>({
     reducer: (_p, n) => n, default: () => null,
   }),

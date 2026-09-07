@@ -11,6 +11,7 @@ import { ImplementationReport, ReviewReport } from "../../domain/reports.js";
 import { RepositoryVerifier } from "../../verification/verifier.js";
 import { buildVerificationOutcome } from "../../verification/outcome.js";
 import { capturePolicy } from "../../verification/checkPolicy.js";
+import { planFromProposal } from "../../reasoning/proposal.js";
 import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
 import { AgentReport } from "../../domain/implementation.js";
 import { issueGrant, grantIdFor } from "../../domain/grant.js";
@@ -172,9 +173,15 @@ export const plan = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "plan", at: now() });
 
-    // Deterministic placeholder plan. A later phase replaces this with a model
-    // call; the shape it must produce is fixed here.
-    const proposed: TPlan = Plan.parse({
+    /**
+     * The deterministic plan. Used when no reasoning model is configured, which
+     * remains the default, and when one is configured but FAILS.
+     *
+     * It proposes no scope, so it can mint no write authority - which is the
+     * correct thing to fall back to. A failed reasoning call must never produce
+     * a more capable plan than a successful one.
+     */
+    const fallbackPlan = (note: string): TPlan => Plan.parse({
       summary: `Plan for: ${state.request}`,
       steps: [
         { order: 0, description: "Inspect the affected area (read-only)", risk: "LOW" },
@@ -182,12 +189,86 @@ export const plan = (ctx: NodeContext) =>
         { order: 2, description: "Run project verification checks", risk: "LOW" },
       ],
       allowedScope: [],
-      risks: ["Phase 1+2 stub plan - no implementation capability exists yet"],
+      risks: [note],
       highestRisk: "HIGH",
     });
 
+    const model = ctx.reasoningModel;
+    if (!model) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "plan", at: now() });
+      return {
+        proposedPlan: fallbackPlan(
+          "No reasoning model is configured; this is a deterministic placeholder " +
+          "plan that authorises no scope.",
+        ),
+        phase: "approve_plan",
+      } as OrchestratorUpdate;
+    }
+
+    const project = ctx.store.getProject(state.projectId);
+    const result = await model.generate({
+      runId: state.runId,
+      operation: "propose_plan",
+      context: {
+        // ALL UNTRUSTED. Bounded observations the orchestrator made itself plus
+        // human-written constraints - no file contents, no environment, no
+        // grants, no credentials. See reasoning/prompt.ts.
+        request: state.request,
+        projectName: project?.name ?? state.projectId,
+        observations: state.observations ?? [],
+        constraints: project?.constraints ?? [],
+      },
+    });
+
+    ctx.emit({
+      type: "reasoning_completed", runId: state.runId, node: "plan",
+      provider: result.record.provider, model: result.record.model,
+      ok: result.ok, failureCode: result.ok ? null : result.failure.code,
+      durationMs: result.record.durationMs, at: now(),
+    });
+
+    /**
+     * FAIL CLOSED.
+     *
+     * A model failure produces the zero-scope placeholder and records why. It
+     * does NOT skip the gate, does not proceed to implementation, and does not
+     * become an empty success - the run still stops for a human, who can now
+     * see that reasoning was unavailable.
+     */
+    if (!result.ok) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "plan", at: now() });
+      return {
+        proposedPlan: fallbackPlan(
+          `Reasoning failed (${result.failure.code}): ${result.failure.message}. ` +
+          "This placeholder plan authorises no scope.",
+        ),
+        reasoning: result.record,
+        reasoningFailure: result.failure,
+        reasoningNotes: [`reasoning unavailable: ${result.failure.code}`],
+        phase: "approve_plan",
+      } as OrchestratorUpdate;
+    }
+
+    /**
+     * THE TRUST BOUNDARY.
+     *
+     * `result.proposal` is validated but still UNTRUSTED - schema validity says
+     * the shape is right, never that the content is true or well-intentioned.
+     * `planFromProposal` is trusted code: it rebuilds the plan field by field,
+     * computes risk itself, and re-checks every proposed path against the real
+     * scope rules. Nothing from the model reaches a `Plan` without passing
+     * through it, and nothing it produces is authority until a human approves.
+     */
+    const translated = planFromProposal(result.proposal, state.request);
+
     ctx.emit({ type: "node_completed", runId: state.runId, node: "plan", at: now() });
-    return { proposedPlan: proposed, phase: "approve_plan" };
+    return {
+      proposedPlan: translated.plan,
+      reasoning: result.record,
+      reasoningFailure: null,
+      reasoningNotes: translated.notes,
+      phase: "approve_plan",
+    } as OrchestratorUpdate;
   };
 
 // 4 -------------------------------------------------------------- approve_plan

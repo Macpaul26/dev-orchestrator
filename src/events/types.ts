@@ -67,6 +67,23 @@ export const OrchestratorEvent = z.discriminatedUnion("type", [
     scopeDriftCount: z.number().int().nonnegative(),
     at: z.string(),
   }),
+  /**
+   * One reasoning call happened. METADATA ONLY.
+   *
+   * No prompt, no response, no credential - this lands in the durable event
+   * history, and a reasoning prompt carries project text while a response is
+   * untrusted model output. Neither belongs in an audit trail. What is recorded
+   * is that a call was made, to which model, and whether a VALIDATED proposal
+   * came back.
+   */
+  z.object({
+    type: z.literal("reasoning_completed"),
+    runId: z.string(), node: z.string(),
+    provider: z.string(), model: z.string(),
+    ok: z.boolean(), failureCode: z.string().nullable(),
+    durationMs: z.number().nonnegative(),
+    at: z.string(),
+  }),
   z.object({
     type: z.literal("workflow_completed"),
     runId: z.string(), outcome: z.string(), at: z.string(),

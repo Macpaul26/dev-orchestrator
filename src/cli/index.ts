@@ -8,6 +8,10 @@ import { createRegistry, describeCapabilities } from "../tools/registry.js";
 import { ImplementationLock } from "../implementation/lock.js";
 import { ActivityJournal } from "../activity/journal.js";
 import { configFromEnvironment, ENV_EXECUTABLE } from "../adapters/claude-code/config.js";
+import {
+  reasoningConfigured, ENV_API_KEY as REASONING_ENV_KEY,
+  ENV_MODEL as REASONING_ENV_MODEL,
+} from "../models/anthropicModel.js";
 import { EventLog } from "../events/log.js";
 import { renderApproval, renderRun, renderRuns, renderInspection, line } from "./render.js";
 import { createInspectorForProject } from "../adapters/repository/index.js";
@@ -271,6 +275,23 @@ program
     line("  shell: false, argv array, built environment, bounded output, hard timeout");
     line("  the repository is re-inspected afterwards - a check is executable code");
     line("  NOT a sandbox: a check runs with this user's privileges");
+    line("");
+    line("REASONING MODEL BOUNDARY (Task 006)");
+    line(`  configured: ${reasoningConfigured() ? "yes" : "no"}`);
+    if (!reasoningConfigured()) {
+      line(`  configure with ${REASONING_ENV_KEY}=<key> (optionally ${REASONING_ENV_MODEL}=<model>)`);
+      line("  unconfigured is the default; the workflow uses a deterministic plan");
+      line("    that authorises no scope");
+    }
+    line("  the model is UNTRUSTED and PROPOSES ONLY");
+    line("  it has no tool, no filesystem, no shell, no network, no grant");
+    line("  its output is bounded, strictly schema-validated, and rebuilt by");
+    line("    trusted code - risk is computed by the orchestrator, and proposed");
+    line("    paths are re-checked against the real scope rules");
+    line("  a model failure or a refused response yields a ZERO-SCOPE plan");
+    line("  it cannot approve anything: the human plan gate is unchanged");
+    line("  prompt injection is NOT solved by prompting - the controls are the");
+    line("    schema, the rebuild, and the human gate");
     line("");
     line("AGENT PROCESS BOUNDARY (Phase 4B.1)");
     let adapter: ReturnType<typeof configFromEnvironment> = null;

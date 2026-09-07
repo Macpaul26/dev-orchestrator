@@ -5,6 +5,7 @@ import type { OrchestratorStateType } from "./state.js";
 import type { RepositoryInspector } from "../domain/inspector.js";
 import type { CheckRunner } from "../verification/checks.js";
 import type { VerificationCheckPhase } from "../verification/checkPhase.js";
+import type { ReasoningModel } from "../models/reasoningModel.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 
 /**
@@ -32,6 +33,13 @@ export interface NodeContext {
    * repository - a check is executable code and can change files.
    */
   checkPhase: VerificationCheckPhase;
+  /**
+   * The reasoning model, when one is configured. Null is the default.
+   *
+   * UNTRUSTED. It produces proposals and nothing else - there is no path from
+   * here to the tool registry, the grant authority, a process, or an approval.
+   */
+  reasoningModel: ReasoningModel | null;
   /**
    * The implementation agent, if one is configured.
    *
