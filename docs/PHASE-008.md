@@ -229,7 +229,26 @@ determinism under reordering, prompt-injection text as data, context
 integration, durable-state scanning, and four architecture assertions including
 that the capability matrix is unchanged.
 
-## 13. Known limitations
+## 13. Relationship to the future learning system
+
+Repository evidence is a **foundational observation source** for the experience
+and learning subsystem described in
+[PHASE-008-LEARNING.md](PHASE-008-LEARNING.md) - and nothing more. It observes;
+it does not remember, evaluate, or learn.
+
+```
+Repository Evidence = observe        Verification = test
+Review              = evaluate       Experience   = remember
+Learning            = identify lessons
+Reasoning Model     = propose        Human        = decide
+```
+
+That subsystem is **architecture only** - no store, no retrieval, no confidence
+engine, and nothing writes an experience record. The boundary it must preserve
+is the same one this phase preserves: evidence and lessons inform reasoning and
+never become authority.
+
+## 14. Known limitations
 
 1. **The total evidence budget can bind on a pathological batch**, and when it
    does the result is genuinely incomplete - reported, but incomplete. That is
