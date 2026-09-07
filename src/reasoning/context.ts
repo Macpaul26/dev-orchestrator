@@ -1,5 +1,6 @@
 import {
   ContextRecord, AssembledContext, ContextFailure, CONTEXT_LIMITS, ContextProvenance,
+  fieldLimitFor,
   PROVENANCE_RANK, PROVENANCE_LABEL, isCritical,
   type ContextRecord as TContextRecord,
   type AssembledContext as TAssembledContext,
@@ -114,12 +115,42 @@ export function assembleContext(
        */
       const named = ContextProvenance.safeParse(input.provenance);
       return fail(
-        "invalid_record",
+        named.success && named.data === "TASK_DESCRIPTION"
+          ? "task_description_invalid"
+          : "invalid_record",
+        // Lengths and categories only. The text is never quoted into a failure:
+        // it may be the very thing that was too long, or sensitive.
         "a context record did not validate (unknown provenance, unexpected " +
         "field, or a field over its length limit)",
         named.success ? named.data : null,
       );
     }
+    /**
+     * THE PER-PROVENANCE FIELD BOUND IS ENFORCED HERE, AND ONLY HERE.
+     *
+     * The schema can only apply one maximum, so it uses the largest any
+     * provenance permits; this narrows it to the correct one. Doing it in the
+     * assembler is the whole point of the correction: a caller that trimmed to
+     * fit before calling would hand over an already-shortened value, and this
+     * boundary would have no way to know something was lost.
+     *
+     * A TASK_DESCRIPTION over its bound is CRITICAL, so it fails the assembly
+     * rather than being shortened - the model must not be asked to plan against
+     * a request it was only shown part of.
+     */
+    const limit = fieldLimitFor(parsed.data.provenance);
+    if (parsed.data.text.length > limit) {
+      return fail(
+        parsed.data.provenance === "TASK_DESCRIPTION"
+          ? "task_description_invalid"
+          : "invalid_record",
+        `a ${parsed.data.provenance} record is ${String(parsed.data.text.length)} ` +
+        `characters, over its ${String(limit)}-character bound; assembly refused ` +
+        "rather than shortening it",
+        parsed.data.provenance,
+      );
+    }
+
     validated.push(parsed.data);
   }
 

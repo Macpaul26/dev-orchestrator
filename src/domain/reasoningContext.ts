@@ -101,6 +101,20 @@ export function isCritical(provenance: ContextProvenance): boolean {
   return CRITICAL_PROVENANCE.includes(provenance);
 }
 
+/**
+ * The field-length bound for one provenance.
+ *
+ * THE SINGLE PLACE this question is answered. Callers that build context
+ * records must not pre-trim to fit - if they do, the assembler receives an
+ * already-shortened value and cannot tell that anything was lost, which is
+ * exactly how a critical record gets silently truncated.
+ */
+export function fieldLimitFor(provenance: ContextProvenance): number {
+  return provenance === "TASK_DESCRIPTION"
+    ? CONTEXT_LIMITS.maxTaskDescriptionLength
+    : CONTEXT_LIMITS.maxTextLength;
+}
+
 /** The human-facing label each provenance renders as. */
 export const PROVENANCE_LABEL: Readonly<Record<ContextProvenance, string>> = {
   PROJECT_METADATA: "TRUSTED PROJECT FACT",
@@ -115,6 +129,15 @@ export const PROVENANCE_LABEL: Readonly<Record<ContextProvenance, string>> = {
 export const CONTEXT_LIMITS = {
   maxRecords: 200,
   maxTotalChars: 24_000,
+  /**
+   * Field bound for every provenance EXCEPT the task description.
+   *
+   * The two are separate on purpose: an observation or an agent claim is a
+   * one-line fact and has no business being long, whereas a request a human
+   * typed can legitimately run to several paragraphs. Both are enforced in the
+   * assembler - see `fieldLimitFor` - so neither can be applied somewhere else
+   * and drift.
+   */
   maxTextLength: 2_000,
   maxKeyLength: 200,
   maxProjectMetadata: 20,
@@ -142,7 +165,17 @@ export const ContextRecord = z.object({
    * the thing that makes two runs over the same facts produce the same prompt.
    */
   key: z.string().min(1).max(CONTEXT_LIMITS.maxKeyLength),
-  text: z.string().min(1).max(CONTEXT_LIMITS.maxTextLength),
+  /**
+   * Bounded at the LARGEST field limit any provenance allows.
+   *
+   * The per-provenance bound is applied by the assembler rather than here,
+   * because this schema cannot see which provenance it is validating against
+   * its own limit. Capping this at `maxTextLength` was the bug the Task 007
+   * review found: it made `maxTaskDescriptionLength` unreachable, so the
+   * declared 4,000-character task bound did not exist and a long request was
+   * silently shortened upstream to fit 2,000.
+   */
+  text: z.string().min(1).max(CONTEXT_LIMITS.maxTaskDescriptionLength),
   /** Optional ISO timestamp, used as a secondary sort key. */
   at: z.string().datetime().nullable().default(null),
 }).strict();

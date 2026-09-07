@@ -133,6 +133,15 @@ export const ReasoningFailureCode = z.enum([
   "transport_failed",
   /** The response exceeded the byte ceiling before parsing was attempted. */
   "response_too_large",
+  /**
+   * The rendered PROMPT exceeded the transport limit.
+   *
+   * Distinct from `response_too_large`, which is about what came back. This is
+   * about what we refused to send - and refusing is the point: the alternative
+   * is shortening a prompt whose critical context the assembler deliberately
+   * preserved.
+   */
+  "context_too_large",
   /** The response was not the structured shape we required. */
   "malformed_response",
   /** It parsed as JSON but failed schema validation - including strict-key. */

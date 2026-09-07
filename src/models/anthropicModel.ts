@@ -6,7 +6,7 @@ import {
 import type {
   ReasoningModel, ReasoningRequest, ReasoningResult,
 } from "./reasoningModel.js";
-import { systemPrompt, userPrompt, extractJson } from "../reasoning/prompt.js";
+import { systemPrompt, buildUserPrompt, extractJson } from "../reasoning/prompt.js";
 
 /**
  * THE ANTHROPIC REASONING PROVIDER
@@ -112,6 +112,22 @@ export class AnthropicReasoningModel implements ReasoningModel {
       return fail("cancelled", "the run was cancelled before the request was sent");
     }
 
+    /**
+     * Render BEFORE the network call, and refuse rather than shorten.
+     *
+     * Defence in depth: the plan node checks this too, so no provider can be
+     * the only thing standing between an oversized context and a truncated
+     * prompt. Either way the request is never sent.
+     */
+    const prompt = buildUserPrompt(request.context);
+    if (!prompt.ok) {
+      return fail(
+        "context_too_large",
+        `the rendered prompt is ${String(prompt.renderedChars)} characters, over ` +
+        `the ${String(prompt.limit)}-character transport limit; nothing was sent`,
+      );
+    }
+
     let raw: string;
     let inputTokens: number | null;
     let outputTokens: number | null;
@@ -124,7 +140,7 @@ export class AnthropicReasoningModel implements ReasoningModel {
           // travels only in the user turn, fenced. See reasoning/prompt.ts -
           // and note that this separation helps, it does not guarantee.
           system: systemPrompt(),
-          messages: [{ role: "user", content: userPrompt(request.context) }],
+          messages: [{ role: "user", content: prompt.text }],
           thinking: { type: "adaptive" },
         },
         { signal: request.signal },

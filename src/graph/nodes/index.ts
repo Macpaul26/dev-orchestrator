@@ -13,6 +13,7 @@ import { buildVerificationOutcome } from "../../verification/outcome.js";
 import { capturePolicy } from "../../verification/checkPolicy.js";
 import { planFromProposal } from "../../reasoning/proposal.js";
 import { assembleContext, detectAuthorityConflicts } from "../../reasoning/context.js";
+import { buildUserPrompt } from "../../reasoning/prompt.js";
 import {
   projectMetadata, humanDecisions, humanConstraints,
   repositoryObservations, taskDescription, historicalAgentClaims,
@@ -187,8 +188,20 @@ export const plan = (ctx: NodeContext) =>
      * correct thing to fall back to. A failed reasoning call must never produce
      * a more capable plan than a successful one.
      */
-    const fallbackPlan = (note: string): TPlan => Plan.parse({
-      summary: `Plan for: ${state.request}`,
+    const fallbackPlan = (note: string, summary?: string): TPlan => Plan.parse({
+      /**
+       * The request is echoed only when a caller does not supply a summary,
+       * and never in full.
+       *
+       * A plan summary reads back what was asked, which is useful - right up
+       * until the reason for the fallback IS the request, as it is when the
+       * task description is over its bound. Echoing it there would put the
+       * oversized (and possibly sensitive) text straight into the plan, the
+       * approval payload and the checkpoint, defeating the refusal that had
+       * just been made. Callers on a context-failure path pass their own
+       * summary and omit it entirely.
+       */
+      summary: summary ?? `Plan for: ${state.request.slice(0, 200)}`,
       steps: [
         { order: 0, description: "Inspect the affected area (read-only)", risk: "LOW" },
         { order: 1, description: "Apply the requested change", risk: "HIGH" },
@@ -260,6 +273,8 @@ export const plan = (ctx: NodeContext) =>
           `Reasoning context could not be assembled (${assembled.failure.code}): ` +
           `${assembled.failure.message}. No model call was made. This ` +
           "placeholder plan authorises no scope.",
+          // NO REQUEST TEXT. The request may be exactly what was refused.
+          "Planning stopped: the reasoning context could not be assembled.",
         ),
         reasoningNotes: [`context assembly failed: ${assembled.failure.code}`],
         phase: "approve_plan",
@@ -272,6 +287,32 @@ export const plan = (ctx: NodeContext) =>
      * that a low-authority claim touches something they decided.
      */
     const conflicts = detectAuthorityConflicts(assembled.context);
+
+    /**
+     * RENDERING IS CHECKED HERE, BEFORE ANY PROVIDER IS INVOLVED.
+     *
+     * The provider checks too, but a check that lives only inside one provider
+     * would be a control a second provider could forget. Doing it here means no
+     * model - real or fake - can be handed a context that will not render, and
+     * the alternative to failing is shortening a prompt whose critical context
+     * the assembler deliberately preserved.
+     */
+    const rendered = buildUserPrompt({ assembled: assembled.context });
+    if (!rendered.ok) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "plan", at: now() });
+      return {
+        proposedPlan: fallbackPlan(
+          `The reasoning context could not be rendered within the transport ` +
+          `limit (${String(rendered.renderedChars)} of ` +
+          `${String(rendered.limit)} characters). No model call was made and ` +
+          "nothing was shortened. This placeholder plan authorises no scope.",
+          "Planning stopped: the reasoning context could not be rendered.",
+        ),
+        reasoningNotes: ["context rendering failed: over the transport limit"],
+        contextSummary: summariseContext(assembled.context),
+        phase: "approve_plan",
+      } as OrchestratorUpdate;
+    }
 
     const result = await model.generate({
       runId: state.runId,
