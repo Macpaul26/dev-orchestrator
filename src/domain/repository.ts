@@ -91,6 +91,39 @@ export const GitCommit = z.object({
 export type GitCommit = z.infer<typeof GitCommit>;
 
 /**
+ * WHETHER GIT ITSELF WAS USED DURING AN ATTEMPT.
+ *
+ * Separate from the changed-file listing, and it has to be: an agent that
+ * writes a file, stages it and commits it leaves a CLEAN working tree. Every
+ * signal based on "what is dirty now" reports nothing, and the attempt reads as
+ * though it did nothing at all.
+ *
+ * So this asks a different question - did the repository move? - and answers it
+ * from HEAD, the ref, and the commit list, none of which a clean status can
+ * hide. It is a pure OBSERVATION: whether the mutation was permitted is decided
+ * elsewhere, from the capabilities a human actually granted.
+ */
+export const GitMutationObservation = z.object({
+  /** True when git state moved during the attempt, by any observed signal. */
+  detected: z.boolean().default(false),
+  headChanged: z.boolean().default(false),
+  headBefore: z.string().nullable().default(null),
+  headAfter: z.string().nullable().default(null),
+  /** True when the checked-out ref is not the one we started on. */
+  branchChanged: z.boolean().default(false),
+  branchBefore: z.string().nullable().default(null),
+  branchAfter: z.string().nullable().default(null),
+  /** SHAs that exist now and did not at the baseline. Observed, never claimed. */
+  newCommits: z.array(z.string()).default([]),
+  /**
+   * Why we concluded git moved. Plain sentences for a human at the review gate,
+   * kept alongside the booleans so a reader never has to infer the reason.
+   */
+  reasons: z.array(z.string()).default([]),
+});
+export type GitMutationObservation = z.infer<typeof GitMutationObservation>;
+
+/**
  * A unified diff, with an explicit record of what was left out.
  *
  * `excludedFiles` matters as much as the diff text: it is how a reviewer learns

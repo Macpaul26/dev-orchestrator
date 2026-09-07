@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { GitCommit, InspectionFailure } from "./repository.js";
+import { GitCommit, GitMutationObservation, InspectionFailure } from "./repository.js";
 import { ScopeVerdict } from "./scope.js";
 import { AttributionSummary } from "./attribution.js";
 
@@ -78,6 +78,13 @@ export const ReviewEvidence = z.object({
   newCommits: z.array(GitCommit).default([]),
   headCommitBefore: z.string().nullable().default(null),
   headCommitAfter: z.string().nullable().default(null),
+  /**
+   * Whether git itself moved during the attempt.
+   *
+   * Independent of `workingTreeClean` on purpose - a committed change leaves a
+   * clean tree, and this is the field that still says something happened.
+   */
+  gitMutation: GitMutationObservation.default(() => GitMutationObservation.parse({})),
   /** Null when nothing was claimed; otherwise whether that SHA really exists. */
   claimedCommitExists: z.boolean().nullable().default(null),
 

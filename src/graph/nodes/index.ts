@@ -481,6 +481,9 @@ export const verify = (ctx: NodeContext) =>
       toolRequestsHandled: (state.implementationRun?.writes ?? 0)
         + (state.implementationRun?.deletes ?? 0),
       checksDeclared: declaredChecks.length,
+      // What the HUMAN authorised, straight from the grant. Never inferred
+      // from what the agent turned out to be able to do.
+      grantedCapabilities: state.grant?.capabilities ?? [],
     });
 
     ctx.emit({ type: "node_completed", runId: state.runId, node: "verify", at: now() });
@@ -612,6 +615,32 @@ export const review = (ctx: NodeContext) =>
      * clean pass, whatever the agent said and whatever its process returned.
      */
     const outcome = state.verification;
+
+    /**
+     * UNAUTHORISED GIT MUTATION IS ALWAYS A BLOCKER.
+     *
+     * Raised whenever it was OBSERVED, not only when it happened to win the
+     * verdict. A run that commits a credential is both a sensitive change and
+     * an unauthorised mutation; the verdict names one, and a human needs to see
+     * both. Nothing has been reverted - this is a report, not a remedy.
+     */
+    const gitMutation = outcome?.observation.gitMutation;
+    if (gitMutation?.detected && !outcome?.observation.gitMutationAuthorised) {
+      findings.push({
+        severity: "blocker",
+        message:
+          "Git was used during this run and no granted capability authorised it. " +
+          `Observed: ${gitMutation.reasons.join("; ")}. The repository has been ` +
+          "left exactly as found - nothing was reverted or reset.",
+      });
+      for (const sha of gitMutation.newCommits) {
+        findings.push({
+          severity: "blocker",
+          message: `Unauthorised commit created during this run: ${sha}`,
+        });
+      }
+    }
+
     for (const disagreement of outcome?.disagreements ?? []) {
       findings.push({ severity: "warning", message: `Disagreement: ${disagreement}` });
     }
@@ -699,6 +728,10 @@ export const approveReview = (ctx: NodeContext) =>
           processExitCode: state.verification?.process?.exitCode ?? null,
           processStatus: state.verification?.process?.status ?? null,
           checksAvailable: state.verification?.checks.available ?? false,
+          gitMutationDetected: state.verification?.observation.gitMutation.detected ?? false,
+          gitMutationAuthorised: state.verification?.observation.gitMutationAuthorised ?? false,
+          gitMutationReasons: state.verification?.observation.gitMutation.reasons ?? [],
+          unauthorisedCommits: state.verification?.observation.gitMutation.newCommits ?? [],
           verifiedIndependently: state.implementation?.verifiedIndependently ?? false,
           observedFileCount: state.implementation?.observedFiles.length ?? 0,
           observedCommitCount: state.implementation?.observedCommits.length ?? 0,

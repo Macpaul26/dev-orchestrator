@@ -79,6 +79,20 @@ export function renderApproval(request: ApprovalRequest): void {
         "(a fact about a program, not about the repository)",
       );
     }
+    if (verification["gitMutationDetected"] === true) {
+      const authorised = verification["gitMutationAuthorised"] === true;
+      line(
+        `    GIT MUTATION DETECTED - ${authorised ? "authorised" : "NOT AUTHORISED BY ANY GRANT"}`,
+      );
+      for (const reason of (verification["gitMutationReasons"] as string[] | undefined) ?? []) {
+        line(`      - ${reason}`);
+      }
+      const commits = (verification["unauthorisedCommits"] as string[] | undefined) ?? [];
+      if (commits.length > 0 && !authorised) {
+        line(`      unauthorised commit(s): ${commits.join(", ")}`);
+      }
+      if (!authorised) line("      nothing was reverted or reset - this is a report");
+    }
     const disagreements = (verification["disagreements"] as string[] | undefined) ?? [];
     if (disagreements.length > 0) {
       line(`    DISAGREEMENTS (${disagreements.length}) between the agent account and the repository:`);

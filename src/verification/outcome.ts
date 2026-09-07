@@ -21,8 +21,13 @@ import type { AgentReport } from "../domain/implementation.js";
  *
  *   1. inspection failed          -> blocked   (we could not look; nothing is known)
  *   2. sensitive file changed     -> sensitive_change
- *   3. changes outside scope      -> scope_drift
- *   4. otherwise                  -> verified
+ *   3. unauthorised git mutation  -> git_mutation
+ *   4. changes outside scope      -> scope_drift
+ *   5. otherwise                  -> verified
+ *
+ * Order is precedence, not exclusivity: every condition that holds is recorded
+ * in the observation and raised as a finding. A run that commits a credential
+ * reports BOTH, and the verdict names the one a human should read first.
  *
  * `verified` says one thing only: we inspected the repository ourselves, and
  * what we found was inside what a human authorised. It does NOT say the task was
@@ -39,12 +44,32 @@ export interface BuildOutcomeInput {
   /** Orchestrator-counted: did any tool actually serve this agent? */
   toolRequestsHandled?: number;
   checksDeclared?: number;
+  /**
+   * The capabilities a human actually granted.
+   *
+   * Used for one question: was git mutation authorised? Passed in rather than
+   * inferred, because "what was permitted" is a property of the human decision
+   * and must never be reconstructed from what the agent managed to do.
+   */
+  grantedCapabilities?: readonly string[];
 }
 
 export function buildVerificationOutcome(input: BuildOutcomeInput): TVerificationOutcome {
   const { evidence, report } = input;
   const notes: string[] = [];
   const disagreements: string[] = [];
+
+  /**
+   * Git mutation is judged against the GRANT, not against the outcome.
+   *
+   * `git.mutate` is not among the capabilities Phase 4B issues, so in practice
+   * this is always false and any observed mutation is unauthorised. It is still
+   * written as a capability check rather than a constant: the day a grant can
+   * carry `git.mutate`, this stays correct instead of silently blocking it.
+   */
+  const gitMutationAuthorised = (input.grantedCapabilities ?? []).includes("git.mutate");
+  const gitMutation = evidence.gitMutation;
+  const unauthorisedGitMutation = gitMutation.detected && !gitMutationAuthorised;
 
   const observation = RepositoryObservation.parse({
     inspected: evidence.inspectionSucceeded,
@@ -58,6 +83,8 @@ export function buildVerificationOutcome(input: BuildOutcomeInput): TVerificatio
     scope: evidence.scope,
     sensitiveFilesChanged: evidence.sensitiveFilesChanged,
     newCommits: evidence.newCommits.map((c) => c.sha),
+    gitMutation,
+    gitMutationAuthorised,
   });
 
   // ---- where the two accounts disagree ----------------------------------
@@ -93,6 +120,14 @@ export function buildVerificationOutcome(input: BuildOutcomeInput): TVerificatio
       `${evidence.sensitiveFilesChanged.length} file(s) covered by the sensitive-file ` +
       "policy were modified; names are recorded, contents deliberately are not",
     );
+  } else if (unauthorisedGitMutation) {
+    verdict = "git_mutation";
+    notes.push(
+      "git itself was used during this attempt and no granted capability " +
+      "authorised that; the commit is an independently observed mutation, and " +
+      "it stands whatever the agent reported and whether or not the working " +
+      "tree ended clean. Nothing has been reverted.",
+    );
   } else if (evidence.scope.drift.length > 0) {
     verdict = "scope_drift";
     notes.push(
@@ -104,6 +139,14 @@ export function buildVerificationOutcome(input: BuildOutcomeInput): TVerificatio
     notes.push(
       "inspection completed and every attributable change was inside the approved " +
       "scope; whether the task was actually accomplished is a human judgement",
+    );
+  }
+
+  if (unauthorisedGitMutation) {
+    for (const reason of gitMutation.reasons) notes.push(`unauthorised git mutation: ${reason}`);
+    disagreements.push(
+      "git state moved during this attempt, and no granted capability authorised " +
+      "git mutation",
     );
   }
 

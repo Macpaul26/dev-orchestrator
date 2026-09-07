@@ -70,8 +70,13 @@ nothing else:
 
 1. inspection failed → `blocked` — we could not look, so *nothing* is established
 2. a sensitive file changed → `sensitive_change`
-3. a change landed outside the approved scope → `scope_drift`
-4. otherwise → `verified`
+3. git was used without authorisation → `git_mutation`
+4. a change landed outside the approved scope → `scope_drift`
+5. otherwise → `verified`
+
+Order is precedence, not exclusivity. Every condition that holds is recorded in
+the observation and raised as a finding; the verdict names the one a human should
+read first. A run that commits a credential reports **both**.
 
 The exit code and the agent's claim are recorded *beside* the verdict and
 contribute nothing to it.
@@ -79,6 +84,34 @@ contribute nothing to it.
 `blocked` is deliberately distinct from `failed`: "we looked and it was bad" and
 "we could not look" are different facts, and only the second means a human is
 reading a report with a hole in it.
+
+### Git mutation is detected independently of the working tree
+
+`git.mutate` is not a capability any Phase 4B grant carries, so **any** observed
+git mutation is unauthorised and blocking.
+
+It is detected from HEAD, the checked-out ref and the commit list — deliberately
+not from the changed-file listing, because those two answers come apart in the
+case that matters most:
+
+```
+agent: write file -> git add -> git commit -> exit 0
+result: git status is CLEAN
+```
+
+Every dirty-file signal reports nothing there. The attempt looks identical to one
+that did nothing at all. HEAD does not go quiet like that, so that is what the
+observation is built on.
+
+Two consequences worth stating plainly:
+
+- **An in-scope file committed is still blocking.** Scope and capability are
+  different questions. The human approved *paths*; nobody approved *using git*.
+- **The agent’s account cannot suppress it.** A crash, a non-zero exit, or an
+  explicit claim of failure changes nothing — the commit is an independently
+  observed fact.
+
+Nothing is reverted. No `git reset`, no cleanup. Detection only.
 
 ### Disagreements
 
@@ -130,6 +163,23 @@ been anchored.
     project checks: NOT EXECUTED - any claim that tests pass is unverified
 ```
 
+### Sensitive attribution covers every change shape
+
+Sensitive detection runs over the **attributed change set**, not the final dirty
+listing. The union covers files that changed, were introduced, modified, removed,
+restored, renamed (both paths), or carried into a commit during the run.
+
+The shape that made this necessary is the committed one:
+
+| Shape | Still in `git status` afterwards? |
+| --- | --- |
+| modified in place | yes — was already covered |
+| deleted (tracked file) | yes, as ` D path` — was already covered |
+| renamed (tracked file) | yes, as delete + add — was already covered |
+| **committed** | **no — the tree is clean, and this escaped** |
+
+Paths only. No sensitive content is read, hashed, diffed or recorded at any point.
+
 ### The review verdict
 
 `pass` means something narrow: the two accounts agree, and everything observed
@@ -146,7 +196,12 @@ This withholds a **recommendation**; it decides nothing. `pass` and
 Stated plainly, because each of these is a thing a reader might otherwise assume:
 
 - **No rollback.** Nothing is reverted, ever. A file written outside the approved
-  scope is reported and **left exactly where it is**. A test asserts this.
+  scope is reported and **left exactly where it is**; an unauthorised commit is
+  reported and **left in history** — no reset, no revert, no cleanup. Tests
+  assert both.
+- **No OS-level containment.** A direct bypass — writing to disk or running
+  `git` outside the bridge — is **detected, not prevented**. Saying otherwise
+  would be claiming a sandbox this phase does not have.
 - **No automatic retry.** A failed attempt stops and waits for a human.
 - **No commit, merge, push, or GitHub write.** No deployment.
 - **No project checks are executed.** Running one means executing a command
@@ -179,6 +234,24 @@ because an honest agent proves the happy path and nothing else.
 | cancels itself after writing | recorded as cancelled, partial write attributed, still verified |
 | every attempt shape (6 variants) | an outcome always exists — "we did not verify" is unreachable |
 | replays a spent grant | `GrantDenied`; the second write never lands |
+
+`tests/gitAndSensitiveMutation.test.ts` covers the correction:
+
+| Scenario | Asserted |
+| --- | --- |
+| agent commits its own work | `git_mutation`; blocker names the commit SHA |
+| commits, then claims failure / crashes | mutation still reported; the claim cannot suppress it |
+| **commits leaving a clean working tree** | still detected — the essential case |
+| commits a file fully inside scope | still blocking, on capability grounds |
+| runs git directly, around the bridge | not prevented; bridge served zero mutations; detected |
+| sensitive file modified / deleted / renamed | detected; contents never captured |
+| **sensitive change committed** | sensitive change **and** unauthorised mutation both reported |
+| clean in-scope run | still `verified`, still review `pass` — no regression |
+
+Each fix was mutation-tested: disabling the `git_mutation` derivation fails 6 of
+these, reverting sensitive detection to the dirty listing fails the committed
+case, and removing `--no-renames` fails the committed-rename case. A test that
+passes either way proves nothing, so this was checked rather than assumed.
 | reaches for authority it lacks (10 targets) | none of it is present |
 
 The "goes around the bridge" case deserves emphasis: it is not contrived. Phase
@@ -197,14 +270,20 @@ inspection is, and this is the test that proves what that line does.
    not notice a credential pasted into an ordinary source file that is in scope.
 3. **Attribution needs a baseline.** Where none is available, changes cannot be
    attributed to this run, and the evidence says so rather than guessing.
-4. **A dishonest agent whose changes are all in scope still yields `verified`.**
+4. **Rename detection had to be turned off for attribution.** `git diff
+   --name-only` detects renames by default and then prints only the *new* path,
+   so `deploy.pem → deploy-old.pem` reported `deploy-old.pem` alone and the
+   original credential path was lost. Attribution now passes `--no-renames`,
+   which lists a rename as a delete plus an add — both paths. Found by the
+   correction’s own test, not by inspection.
+5. **A dishonest agent whose changes are all in scope still yields `verified`.**
    That is correct — the verdict describes the repository, not the agent's
    honesty — but it means the disagreement list, not the verdict, is what
    catches a liar whose edits were legal. The review verdict drops to
    `changes_requested` for exactly this reason.
-5. **`usedTools` is inferred from orchestrator-counted writes and deletes.** An
+6. **`usedTools` is inferred from orchestrator-counted writes and deletes.** An
    agent that only read files shows `usedTools: false`, which understates its
    activity. It is a hint for a human, not an input to any decision.
-6. **Checks remain unexecuted**, so no verdict here says anything about whether
+7. **Checks remain unexecuted**, so no verdict here says anything about whether
    the code works. Changing that requires a real decision about process
    execution, not a quiet widening of the capability model.

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import type {
   ImplementationAgent, ImplementationRequest,
 } from "../src/implementation/runner.js";
@@ -45,6 +46,19 @@ export type FakeStep =
    * inspection is what notices it afterwards.
    */
   | { kind: "sideEffect"; path: string; contents: string }
+  /** Delete directly on disk, around the session. */
+  | { kind: "sideEffectDelete"; path: string }
+  /** Rename directly on disk, around the session. */
+  | { kind: "sideEffectRename"; from: string; to: string }
+  /**
+   * Run git DIRECTLY, as a real agent process can.
+   *
+   * There is no bridge tool for this and no capability that grants it - which
+   * is the point. Phase 4B.1 gives the child no OS sandbox, so `git commit` is
+   * simply available to it. Nothing here is expected to stop the command; the
+   * assertion is that verification notices afterwards.
+   */
+  | { kind: "gitCommand"; args: string[] }
   /** Try to reach something it must not have. Asserted to fail. */
   | { kind: "escalate"; target: EscalationTarget };
 
@@ -112,6 +126,22 @@ export class FakeImplementationAgent implements ImplementationAgent {
           break;
         case "throw":
           throw new Error(step.message ?? "the agent failed deliberately");
+        case "sideEffectDelete":
+          fs.rmSync(path.join(this.options.repoRoot!, step.path), { force: true });
+          break;
+        case "sideEffectRename":
+          fs.renameSync(
+            path.join(this.options.repoRoot!, step.from),
+            path.join(this.options.repoRoot!, step.to),
+          );
+          break;
+        case "gitCommand":
+          execFileSync("git", step.args, {
+            cwd: this.options.repoRoot!,
+            encoding: "utf8",
+            env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
+          });
+          break;
         case "sideEffect": {
           // Deliberately not `session.writeFile`. The point is the bypass.
           const target = path.join(this.options.repoRoot!, step.path);

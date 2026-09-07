@@ -134,8 +134,20 @@ export class LocalGitRepositoryInspector implements RepositoryInspector {
     if (!/^[0-9a-fA-F]{4,64}$/.test(baseSha)) return [];
     const prepared = this.prepare();
     if ("failure" in prepared) return [];
+    /**
+     * `--no-renames` IS LOAD-BEARING, NOT A STYLE CHOICE.
+     *
+     * git detects renames by default, and `--name-only` then prints only the
+     * NEW path - so `deploy.pem -> deploy-old.pem` reports `deploy-old.pem`
+     * alone and the original path vanishes. For attribution that is exactly
+     * backwards: which credential file was moved is the part a human needs.
+     *
+     * Turning detection off reports the rename as a delete plus an add, which
+     * lists both paths. We want every path this run touched, not git's
+     * inference about which two of them are "the same file".
+     */
     const result = this.git(prepared.workingDir, "diff", [
-      "--name-only", "-z", `${baseSha}..HEAD`, "--", ".",
+      "--name-only", "--no-renames", "-z", `${baseSha}..HEAD`, "--", ".",
     ]);
     if (!result.ok) return [];
     return result.stdout.split("\0").filter(Boolean).slice(0, this.limits.maxListedFiles);

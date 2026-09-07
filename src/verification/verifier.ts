@@ -2,6 +2,7 @@ import type { RepositoryInspector } from "../domain/inspector.js";
 import type {
   RepositoryEvidence, InspectionFailure, GitCommit,
 } from "../domain/repository.js";
+import { GitMutationObservation } from "../domain/repository.js";
 import {
   ImplementationReport, type ImplementationReport as TImplementationReport,
 } from "../domain/reports.js";
@@ -195,6 +196,56 @@ export class RepositoryVerifier {
       notes.push("repository had no commits at baseline; HEAD now exists.");
     }
 
+    /**
+     * DID GIT ITSELF MOVE?
+     *
+     * Asked separately from "what is dirty now", because the two answers come
+     * apart in exactly the case that matters: an agent that writes, stages and
+     * commits leaves a CLEAN working tree. `changedFiles` is then empty and
+     * every dirty-tree signal reports nothing.
+     *
+     * HEAD, the checked-out ref and the commit list do not go quiet like that.
+     * This records the observation only - whether it was ALLOWED is decided
+     * from the granted capabilities, which the verifier deliberately does not
+     * see. Observation and authorisation stay separate.
+     */
+    const mutationReasons: string[] = [];
+    const headChanged = headBefore !== headAfter;
+    if (headChanged) {
+      mutationReasons.push(
+        headBefore === null
+          ? `HEAD did not exist at baseline and is now ${String(headAfter)}`
+          : `HEAD moved from ${headBefore} to ${String(headAfter)}`,
+      );
+    }
+    const branchBefore = baseline?.branch ?? null;
+    const branchAfter = after.branch ?? null;
+    // Only meaningful when a baseline recorded a ref to compare against.
+    const branchChanged = baseline != null && branchBefore !== branchAfter;
+    if (branchChanged) {
+      mutationReasons.push(
+        `checked-out ref changed from ${branchBefore ?? "(none)"} to ${branchAfter ?? "(none)"}`,
+      );
+    }
+    if (newCommits.length > 0) {
+      mutationReasons.push(
+        `${newCommits.length} commit(s) exist now that did not at baseline`,
+      );
+    }
+    const gitMutation = GitMutationObservation.parse({
+      detected: headChanged || branchChanged || newCommits.length > 0,
+      headChanged, headBefore, headAfter,
+      branchChanged, branchBefore, branchAfter,
+      newCommits: newCommits.map((c) => c.sha),
+      reasons: mutationReasons,
+    });
+    if (gitMutation.detected) {
+      notes.push(
+        "git state moved during this attempt; this is observed from HEAD and the " +
+        "commit list, and does not depend on the working tree being dirty.",
+      );
+    }
+
     // ---- attribution: compare STATE, not filenames -------------------------
     const attribution = await this.attribute(baseline, after, committedPaths);
     const attributable = attribution.attributable;
@@ -227,11 +278,39 @@ export class RepositoryVerifier {
       );
     }
 
-    const sensitiveChanged = observedFiles.filter((f) => classifySensitivity(f).sensitive);
+    /**
+     * SENSITIVE DETECTION RUNS OVER THE ATTRIBUTED CHANGE SET, NOT THE DIRTY LIST.
+     *
+     * Filtering `observedFiles` - what is dirty at the end - misses every shape
+     * where the file LEAVES that listing:
+     *
+     *   delete .env                -> gone from the working tree entirely
+     *   rename secrets.json        -> the old path no longer exists
+     *   modify .env then commit    -> committed, so the tree is clean again
+     *
+     * Each of those is a sensitive file changed by this run, and each would have
+     * read as "no sensitive change". Attribution already tracks these shapes -
+     * it re-stats paths that vanished from the status listing - so the honest
+     * question is "did any attributable change touch a sensitive path", asked
+     * over every source of attribution at once.
+     *
+     * Paths only. No sensitive content is read, hashed or recorded here.
+     */
+    const sensitiveCandidates = new Set<string>([
+      ...observedFiles,
+      ...attributable,
+      ...attribution.renamed.flatMap((r) => [normalisePath(r.from), normalisePath(r.to)]),
+      // Files carried into a commit during this run: invisible to git status.
+      ...committedPaths,
+    ].map(normalisePath).filter(Boolean));
+    const sensitiveChanged = [...sensitiveCandidates]
+      .filter((f) => classifySensitivity(f).sensitive)
+      .sort();
     if (sensitiveChanged.length > 0) {
       notes.push(
-        `${sensitiveChanged.length} sensitive file(s) changed; names recorded, ` +
-          "contents deliberately not captured.",
+        `${sensitiveChanged.length} sensitive file(s) were changed by this run - ` +
+          "including any deleted, renamed or committed, which leave the working-tree " +
+          "listing entirely. Names recorded, contents deliberately not captured.",
       );
     }
 
@@ -317,6 +396,7 @@ export class RepositoryVerifier {
       newCommits,
       headCommitBefore: headBefore,
       headCommitAfter: headAfter,
+      gitMutation,
       claimedCommitExists,
       workingTreeClean: after.clean,
       sensitiveFilesChanged: sensitiveChanged,

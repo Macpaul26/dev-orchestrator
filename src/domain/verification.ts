@@ -2,7 +2,7 @@ import { z } from "zod";
 import { AgentProcessResult } from "./agentProcess.js";
 import { AttributionSummary } from "./attribution.js";
 import { ScopeVerdict } from "./scope.js";
-import { InspectionFailure } from "./repository.js";
+import { InspectionFailure, GitMutationObservation } from "./repository.js";
 
 /**
  * THE VERIFICATION OUTCOME
@@ -49,6 +49,19 @@ export const VerificationVerdict = z.enum([
   "blocked",
   /** Changes landed outside the approved scope. */
   "scope_drift",
+  /**
+   * Git itself was used, and no capability authorised that.
+   *
+   * Deliberately its own verdict rather than a flavour of `scope_drift`. The two
+   * describe different failures: drift says the run touched a path a human did
+   * not approve; this says the run reached for a CAPABILITY nobody granted -
+   * true even when every committed file was perfectly in scope.
+   *
+   * It also catches what nothing else can: a commit leaves the working tree
+   * clean, so an attempt that writes, stages and commits looks - to every
+   * dirty-file signal - exactly like an attempt that did nothing.
+   */
+  "git_mutation",
   /** A file the sensitive-file policy covers was modified. */
   "sensitive_change",
 ]);
@@ -77,6 +90,14 @@ export const RepositoryObservation = z.object({
   scope: ScopeVerdict.nullable().default(null),
   sensitiveFilesChanged: z.array(z.string()).default([]),
   newCommits: z.array(z.string()).default([]),
+  /** Whether git moved, observed independently of the working tree. */
+  gitMutation: GitMutationObservation.default(() => GitMutationObservation.parse({})),
+  /**
+   * Whether a human granted `git.mutate`. Not an observation about the
+   * repository - it is what the observation gets judged against, recorded here
+   * so a reader can see both halves of the decision in one place.
+   */
+  gitMutationAuthorised: z.boolean().default(false),
 });
 export type RepositoryObservation = z.infer<typeof RepositoryObservation>;
 
@@ -131,7 +152,7 @@ export type VerificationOutcome = z.infer<typeof VerificationOutcome>;
 
 /** Verdicts that must stop an attempt being waved through at review. */
 export const BLOCKING_VERDICTS: readonly VerificationVerdict[] = [
-  "failed", "blocked", "scope_drift", "sensitive_change",
+  "failed", "blocked", "scope_drift", "sensitive_change", "git_mutation",
 ] as const;
 
 export function isBlocking(verdict: VerificationVerdict): boolean {
