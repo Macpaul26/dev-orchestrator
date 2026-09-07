@@ -17,6 +17,7 @@ import { buildUserPrompt } from "../../reasoning/prompt.js";
 import {
   projectMetadata, humanDecisions, humanConstraints,
   repositoryObservations, taskDescription, historicalAgentClaims,
+  repositoryEvidence,
 } from "../../reasoning/contextSources.js";
 import { summariseContext } from "../../domain/reasoningContext.js";
 import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
@@ -249,11 +250,34 @@ export const plan = (ctx: NodeContext) =>
      * own record of previous runs. It does not get source code, and Task 007
      * deliberately does not add a way for it to ask.
      */
+    /**
+     * CONTROLLED REPOSITORY EVIDENCE (Task 008).
+     *
+     * Requested by TRUSTED CODE with a fixed set of operations. The model does
+     * not choose these, cannot add to them, and has no interface that could.
+     *
+     * METADATA ONLY. FILE_EXCERPT exists in the service, is bounded and tested,
+     * and is deliberately NOT requested here: deciding WHICH files to excerpt
+     * would need either a model choice, which is forbidden, or a heuristic this
+     * task was not asked to invent. Narrower is the right default, and widening
+     * it later is a reviewable edit to these three lines.
+     */
+    const evidence = ctx.evidenceService
+      ? await ctx.evidenceService.inspect([
+          { operation: "REPOSITORY_METADATA" },
+          { operation: "REPOSITORY_STATUS" },
+          { operation: "CHANGED_FILES" },
+        ])
+      : null;
+
     const assembled = assembleContext([
       ...projectMetadata(project),
       ...humanDecisions(ctx.store.listDecisions(state.projectId)),
       ...humanConstraints(project.constraints),
       ...repositoryObservations(state.observations ?? []),
+      // Through the SAME assembler as everything else - validation, sensitive
+      // checks, ordering, dedup, bounds, fence. No shortcut path exists.
+      ...(evidence ? repositoryEvidence(evidence) : []),
       ...taskDescription(state.request),
       ...historicalAgentClaims(ctx.store.listImplementations(state.projectId)),
     ]);

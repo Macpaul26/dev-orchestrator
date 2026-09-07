@@ -5,7 +5,8 @@ import { ProjectStore } from "../src/projects/projectStore.js";
 import { WorkflowRunner } from "../src/graph/runner.js";
 import { createCheckpointer, closeCheckpointer } from "../src/persistence/checkpointer.js";
 import {
-  CONTEXT_LIMITS, fieldLimitFor, isCritical, ContextProvenance,
+  CONTEXT_LIMITS, fieldLimitFor, isCritical,
+  type ContextProvenance,
 } from "../src/domain/reasoningContext.js";
 import { assembleContext, type ContextInput } from "../src/reasoning/context.js";
 import {

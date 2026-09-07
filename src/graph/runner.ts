@@ -20,6 +20,7 @@ import { createInspectorForProject } from "../adapters/repository/index.js";
 import { DisabledCheckRunner } from "../verification/checks.js";
 import { VerificationCheckPhase } from "../verification/checkPhase.js";
 import { AnthropicReasoningModel } from "../models/anthropicModel.js";
+import { RepositoryEvidenceService } from "../evidence/repositoryEvidence.js";
 import type { ReasoningModel } from "../models/reasoningModel.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 import { ClaudeCodeAgent } from "../adapters/claude-code/agent.js";
@@ -136,14 +137,18 @@ export class WorkflowRunner {
     // graph as an interface. Nodes therefore cannot choose what they inspect or
     // widen their own boundary - the project's workingDir decides both.
     const project = this.store.getProject(run.projectId);
+    const inspector = project ? createInspectorForProject(project) : null;
 
     const ctx: NodeContext = {
       store: this.store,
-      inspector: project ? createInspectorForProject(project) : null,
+      inspector,
       // Declared checks are recorded, never run. See verification/checks.ts.
       checkRunner: new DisabledCheckRunner(),
       checkPhase: new VerificationCheckPhase(),
       reasoningModel: this.configuredReasoningModel(),
+      // Built from the SAME inspector, so it inherits the boundary the
+      // rest of the workflow is confined to rather than declaring its own.
+      evidenceService: inspector ? new RepositoryEvidenceService(inspector) : null,
       // Null in production - Phase 4A connects no coding agent. Tests inject a
       // deterministic fake to exercise the capability boundary.
       // An explicitly injected agent wins; otherwise use one the operator

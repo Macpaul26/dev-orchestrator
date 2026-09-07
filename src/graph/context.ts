@@ -6,6 +6,7 @@ import type { RepositoryInspector } from "../domain/inspector.js";
 import type { CheckRunner } from "../verification/checks.js";
 import type { VerificationCheckPhase } from "../verification/checkPhase.js";
 import type { ReasoningModel } from "../models/reasoningModel.js";
+import type { RepositoryEvidenceService } from "../evidence/repositoryEvidence.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 
 /**
@@ -40,6 +41,14 @@ export interface NodeContext {
    * here to the tool registry, the grant authority, a process, or an approval.
    */
   reasoningModel: ReasoningModel | null;
+  /**
+   * Controlled repository evidence (Task 008), when a repository is inspectable.
+   *
+   * A TRUSTED service called by workflow code. The reasoning model has no
+   * interface to it and cannot name an operation or a path; it may only ever
+   * see a bounded summary of what this found, through the context assembler.
+   */
+  evidenceService: RepositoryEvidenceService | null;
   /**
    * The implementation agent, if one is configured.
    *

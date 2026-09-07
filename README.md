@@ -33,6 +33,20 @@ grant-bound operations (`read_file`, `list_directory`, `write_file`,
 filesystem API, and the request protocol has no field for a grant, project,
 session, scope or budget, so authority is not something it can name.
 
+**Task 008 is implemented: controlled repository evidence.**
+
+The orchestrator can now establish narrow, read-only facts about a repository
+for reasoning - metadata, status, changed paths, file metadata, and bounded
+file excerpts - through a closed set of typed operations.
+
+The reasoning model has NO evidence interface and no way to request a file. It
+is trusted workflow code that asks; the model only ever sees a bounded,
+provenance-labelled summary through the same Task 007 context path as every
+other fact. Containment, symlink resolution and the sensitive-file policy are
+the existing Phase 3 machinery, reused rather than rebuilt.
+
+See [docs/PHASE-008.md](docs/PHASE-008.md).
+
 **Task 007 is implemented: the controlled reasoning context.**
 
 The context a reasoning model receives is now assembled in one place, with every
@@ -125,6 +139,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-008.md](docs/PHASE-008.md) | Controlled repository evidence: the closed operation set, the trusted caller boundary, path and sensitive-file security, excerpt bounds, and why the model has no evidence interface |
 | [docs/PHASE-007.md](docs/PHASE-007.md) | The controlled reasoning context: provenance, authority precedence, bounds and fail-closed truncation, deterministic ordering, deduplication, and sensitive-data refusal |
 | [docs/PHASE-006.md](docs/PHASE-006.md) | The reasoning boundary: why model output is never authority, the strict schema and trusted rebuild, the prompt-injection posture, credential handling, and fail-closed behaviour |
 | [docs/PHASE-005.md](docs/PHASE-005.md) | Controlled verification execution: predefined checks, the trusted policy fingerprint, process bounding, the seven outcomes, post-check inspection, and what is detected rather than prevented |

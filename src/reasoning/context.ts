@@ -6,6 +6,7 @@ import {
   type AssembledContext as TAssembledContext,
   type ContextFailure as TContextFailure,
 } from "../domain/reasoningContext.js";
+import { looksLikeSecret } from "../security/secretShapes.js";
 
 /**
  * THE CONTROLLED CONTEXT ASSEMBLER
@@ -41,33 +42,12 @@ export type ContextResult =
   | { ok: false; failure: TContextFailure };
 
 /**
- * Credential-shaped values, refused rather than forwarded.
+ * Credential-shaped values are refused rather than forwarded.
  *
- * A NARROW, VALUE-SHAPED check, and deliberately distinct from
- * security/sensitive.ts - that policy classifies PATHS by name, which cannot
- * answer "does this sentence contain a live token". Two different questions, so
- * two different mechanisms rather than one stretched to cover both badly.
- *
- * This is a backstop, not a guarantee. It catches the recognisable shapes; a
- * secret that looks like ordinary prose passes straight through, which is why
- * Task 007 does not send file contents at all.
+ * The policy itself lives in security/secretShapes.ts, shared with the
+ * repository evidence service (Task 008). Two copies of a secret-detection
+ * rule would eventually disagree, and the disagreement would be the hole.
  */
-const SECRET_SHAPES: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{16,}/,
-  /\bghp_[A-Za-z0-9]{20,}/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,
-  // `NAME=value` where the name is credential-shaped and the value is long
-  // enough to be real. Bounded so an ordinary sentence does not trip it.
-  /(?:^|\s)[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)\s*[:=]\s*\S{8,}/,
-];
-
-export function looksLikeSecret(text: string): boolean {
-  return SECRET_SHAPES.some((pattern) => pattern.test(text));
-}
 
 /**
  * Assemble the context.
@@ -347,3 +327,11 @@ export function detectAuthorityConflicts(
   }
   return conflicts;
 }
+
+/**
+ * Re-exported so existing callers keep one import site.
+ *
+ * The implementation is in security/secretShapes.ts; this is a name, not a
+ * second copy.
+ */
+export { looksLikeSecret };
