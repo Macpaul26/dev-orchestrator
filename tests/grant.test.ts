@@ -40,10 +40,18 @@ describe("the capability model", () => {
     }
   });
 
-  it("implements only bounded repository access in this phase", () => {
+  it("implements bounded repository access plus controlled verification", () => {
+    // Task 005 adds `verification.execute` DELIBERATELY. The list stays exact so
+    // a capability cannot become implemented without editing this assertion.
     expect([...IMPLEMENTED_CAPABILITIES].sort()).toEqual([
       "repo.file.delete", "repo.file.write", "repo.metadata.read", "repo.read",
+      "verification.execute",
     ]);
+    // And the unrestricted ones stay out. `verification.execute` running fixed
+    // checks from trusted config must never widen into `process.execute`.
+    expect(IMPLEMENTED_CAPABILITIES).not.toContain("process.execute");
+    expect(IMPLEMENTED_CAPABILITIES).not.toContain("git.mutate");
+    expect(IMPLEMENTED_CAPABILITIES).not.toContain("network.access");
   });
 
   it("refuses to make an unimplemented capability grantable", () => {

@@ -80,7 +80,14 @@ export class ProjectStore {
       .sort();
   }
 
-  createProject(input: Omit<TProject, "createdAt"> & { createdAt?: string }): TProject {
+  createProject(
+    // `verificationChecks` is optional at the call site so adding it in Task 005
+    // did not require every existing project record and caller to be rewritten.
+    // Zod supplies the default, which is an empty list - no checks, not "all
+    // checks passed".
+    input: Omit<TProject, "createdAt" | "verificationChecks">
+      & { createdAt?: string; verificationChecks?: TProject["verificationChecks"] },
+  ): TProject {
     const project = Project.parse({
       ...input,
       createdAt: input.createdAt ?? new Date().toISOString(),

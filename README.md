@@ -33,6 +33,24 @@ grant-bound operations (`read_file`, `list_directory`, `write_file`,
 filesystem API, and the request protocol has no field for a grant, project,
 session, scope or budget, so authority is not something it can name.
 
+**Task 005 is implemented: controlled verification execution.**
+
+The orchestrator now runs a bounded, explicitly authorised set of project checks
+itself, so it can establish whether the resulting software passes them rather
+than taking an agent's word for it. Checks are `{ executable, args }` from
+trusted configuration - never a command string, never chosen by an agent - and
+the policy is fingerprinted BEFORE the untrusted run, so an agent that rewrites
+the check definitions gets execution blocked rather than executed.
+
+`shell: false`, an argv array, a built environment carrying no credentials, a
+bounded working directory, a hard timeout and bounded output. The repository is
+re-inspected afterwards, because a verification command is executable code.
+
+**This is controlled process execution, not a sandbox**, and an unrun check is
+never a passing check. See [docs/PHASE-005.md](docs/PHASE-005.md), including the
+limitations: network is not actually blocked, and descendant processes may
+survive termination.
+
 **Phase 4B.1 is implemented: the controlled Claude Code process boundary.**
 
 Claude Code can now be launched as an untrusted implementation agent behind a
@@ -53,22 +71,27 @@ new in this phase - **bounded repository writes that require a human-approved,
 expiring, scope-bound grant**, an orchestrator-written activity journal, a
 project-level implementation lock, and durable implementation lifecycle state.
 
-Not real, deliberately: there is no coding agent, no model call, no GitHub
-access, no shell or process execution, no git mutation, no network access, and
-no check execution. Writing requires a grant that only a human approval can
-produce; there is no global "implementation enabled" switch anywhere.
+Not real, deliberately: no model call, no GitHub access, no arbitrary shell or
+process execution, no git mutation, no network access. Writing requires a grant
+that only a human approval can produce; there is no global "implementation
+enabled" switch anywhere.
 
 ```
 $ node dist/cli/index.js tools
 write capabilities registered: false
 shell execution available: false
-check execution enabled: false
+process execution available: false
+git mutation available: false
+network access available: false
+legacy string-command checks executable: false
 ```
 
 Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-005.md](docs/PHASE-005.md) | Controlled verification execution: predefined checks, the trusted policy fingerprint, process bounding, the seven outcomes, post-check inspection, and what is detected rather than prevented |
+| [docs/PHASE-4B3.md](docs/PHASE-4B3.md) | The complete controlled implementation loop: the four-compartment evidence model, git-mutation and sensitive-change detection, and the human review gate |
 | [docs/PHASE-4B2.md](docs/PHASE-4B2.md) | The controlled tool bridge: the four-operation protocol, per-invocation authorisation, path and budget enforcement, protocol hardening, and the hostile-agent tests |
 | [docs/PHASE-4B1.md](docs/PHASE-4B1.md) | The Claude Code adapter, the process boundary, environment isolation, output provenance, cancellation — and precisely what the boundary does *not* protect |
 | [docs/PHASE-4A.md](docs/PHASE-4A.md) | The capability model, implementation grants, the write boundary, the activity journal, cancellation, process death, concurrency, and why Claude Code is not integrated yet |

@@ -6,6 +6,8 @@ import {
 import type { ReviewEvidence } from "../domain/evidence.js";
 import type { AgentProcessResult } from "../domain/agentProcess.js";
 import type { AgentReport } from "../domain/implementation.js";
+import { VerificationCheckRun, summariseChecks,
+  type VerificationCheckRun as TVerificationCheckRun } from "../domain/verificationCheck.js";
 
 /**
  * BUILD THE VERIFICATION OUTCOME
@@ -52,6 +54,8 @@ export interface BuildOutcomeInput {
    * and must never be reconstructed from what the agent managed to do.
    */
   grantedCapabilities?: readonly string[];
+  /** What the controlled check phase did. A process observation, not a claim. */
+  checkRun?: TVerificationCheckRun | null;
 }
 
 export function buildVerificationOutcome(input: BuildOutcomeInput): TVerificationOutcome {
@@ -150,18 +154,71 @@ export function buildVerificationOutcome(input: BuildOutcomeInput): TVerificatio
     );
   }
 
+  /**
+   * CHECKS: A PROCESS OBSERVATION, KEPT APART FROM THE REPOSITORY ONE.
+   *
+   * `allPassed` comes from `summariseChecks`, which returns false for an empty
+   * run. That is the guard against the one mistake that matters here - an
+   * unchecked project reading as a checked one.
+   */
+  const run = input.checkRun ?? VerificationCheckRun.parse({});
+  const summary = summariseChecks(run.results);
   const checks = CheckObservation.parse({
     declared: input.checksDeclared ?? evidence.checksDeclared,
-    executed: evidence.checksExecuted,
-    available: false,
-    unavailableReason:
-      "project checks are not executed: running one means executing a command " +
-      "string, which is the arbitrary process execution the capability model refuses",
+    executed: run.executed,
+    available: run.attempted,
+    unavailableReason: run.attempted ? null : run.notRunReason,
+    run,
+    allPassed: summary.allPassed,
   });
-  if (checks.declared > 0) {
+
+  if (!run.attempted && checks.declared > 0) {
     notes.push(
-      `${checks.declared} project check(s) are declared and NONE were run; any ` +
-      "claim about tests passing is the agent's alone",
+      `${checks.declared} verification check(s) were configured and NONE ran ` +
+      `(${run.notRunReason ?? "no reason recorded"}); this is not a pass`,
+    );
+  } else if (!run.attempted) {
+    notes.push(
+      "no verification check ran, so nothing here establishes that the software " +
+      "works - only that the repository changes were what a human authorised",
+    );
+  } else if (!summary.allPassed) {
+    const failing = run.results.filter((r) => r.status !== "passed");
+    notes.push(
+      `${failing.length} of ${run.results.length} verification check(s) did not ` +
+      `pass: ${failing.map((r) => `${r.checkId}=${r.status}`).join(", ")}`,
+    );
+  }
+
+  /**
+   * A CHECK THAT CHANGED THE REPOSITORY IS ITS OWN FINDING.
+   *
+   * Verification commands are executable code. One that writes to the working
+   * tree has done something nobody asked it to, and the change is attributed to
+   * the checks rather than to the agent.
+   */
+  if (run.repositoryChangedByChecks) {
+    notes.push(
+      `verification checks themselves changed ${run.filesChangedByChecks.length} ` +
+      `file(s): ${run.filesChangedByChecks.slice(0, 10).join(", ")}`,
+    );
+    disagreements.push(
+      "the verification checks modified the repository; a check is executable " +
+      "code and this one did not leave the working tree as it found it",
+    );
+  }
+
+  // The agent asserting success while a check says otherwise is the central
+  // disagreement this whole system exists to surface.
+  if (report.claimsSuccess && run.attempted && !summary.allPassed) {
+    disagreements.push(
+      "agent reported success, but an independently executed verification check " +
+      "did not pass",
+    );
+  }
+  if (!report.claimsSuccess && run.attempted && summary.allPassed && run.results.length > 0) {
+    disagreements.push(
+      "agent did not report success, but every independently executed check passed",
     );
   }
 

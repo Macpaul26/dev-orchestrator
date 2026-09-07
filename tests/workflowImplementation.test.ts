@@ -122,8 +122,11 @@ describe("the grant comes from the human approval and nowhere else", () => {
       }),
     );
     const grant = store.listGrants("proj")[0]!;
+    // Task 005: the same human decision also authorises running the check
+    // policy captured before this run. Nothing broader.
     expect([...grant.capabilities].sort()).toEqual([
       "repo.file.delete", "repo.file.write", "repo.metadata.read", "repo.read",
+      "verification.execute",
     ]);
     for (const forbidden of ["git.mutate", "process.execute", "network.access"]) {
       expect(grant.capabilities).not.toContain(forbidden);

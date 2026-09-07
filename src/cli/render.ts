@@ -98,8 +98,37 @@ export function renderApproval(request: ApprovalRequest): void {
       line(`    DISAGREEMENTS (${disagreements.length}) between the agent account and the repository:`);
       for (const item of disagreements) line(`      - ${item}`);
     }
-    if (verification["checksAvailable"] === false) {
-      line("    project checks: NOT EXECUTED - any claim that tests pass is unverified");
+    /**
+     * CHECKS RENDER AS THEIR OWN SECTION, BELOW THE VERDICT.
+     *
+     * An independently executed check outranks anything the agent said, and the
+     * layout has to make that obvious - the agent's claim is labelled a claim,
+     * and these carry exit codes.
+     */
+    const results = (verification["checkResults"] as
+      { checkId: string; status: string; exitCode: number | null; durationMs: number }[]
+      | undefined) ?? [];
+    if (verification["checksAttempted"] === true) {
+      line(`    project checks: ${results.length} executed` +
+        (verification["checksAllPassed"] === true ? ", ALL PASSED" : ", NOT ALL PASSED"));
+      for (const check of results) {
+        const seconds = (check.durationMs / 1000).toFixed(1);
+        line(
+          `      ${check.checkId}: ${check.status.toUpperCase()}` +
+          (check.exitCode !== null ? ` (exit ${String(check.exitCode)})` : "") +
+          ` ${seconds}s`,
+        );
+      }
+      if (verification["checksChangedRepository"] === true) {
+        const changed = (verification["filesChangedByChecks"] as string[] | undefined) ?? [];
+        line(`      THE CHECKS THEMSELVES CHANGED THE REPOSITORY: ${changed.join(", ")}`);
+        line("      nothing was reverted - this is a report");
+      }
+    } else {
+      line("    project checks: NOT EXECUTED - this is NOT a pass");
+      const reason = verification["checksNotRunReason"];
+      if (typeof reason === "string" && reason.length > 0) line(`      reason: ${reason}`);
+      line("      any claim that tests pass is the agent's alone and is unverified");
     }
     line(`    independently verified: ${String(verification["verifiedIndependently"])}`);
     line(`    observed files ${String(verification["observedFileCount"])}, commits ${String(verification["observedCommitCount"])}`);

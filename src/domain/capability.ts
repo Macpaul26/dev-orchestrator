@@ -31,8 +31,24 @@ export const Capability = z.enum([
   "repo.file.delete",
   /** Commit, branch, reset, push. NOT IMPLEMENTED. */
   "git.mutate",
-  /** Run a program. NOT IMPLEMENTED. */
+  /** Run a program - ANY program, chosen at call time. NOT IMPLEMENTED. */
   "process.execute",
+  /**
+   * Run a PREDEFINED verification check from trusted project configuration.
+   *
+   * Deliberately a separate capability from `process.execute`, and the
+   * separation is the entire security argument for Task 005. The two differ in
+   * WHO CHOOSES WHAT RUNS:
+   *
+   *   process.execute       the caller supplies the program and its arguments
+   *   verification.execute  both are fixed by configuration captured before the
+   *                         untrusted agent ran, and neither can be influenced
+   *                         from inside the run
+   *
+   * Granting this does NOT grant the other, and no code path widens one into
+   * the other. `process.execute` stays unimplemented.
+   */
+  "verification.execute",
   /** Open a socket. NOT IMPLEMENTED. */
   "network.access",
 ]);
@@ -50,6 +66,7 @@ export const IMPLEMENTED_CAPABILITIES: readonly Capability[] = [
   "repo.metadata.read",
   "repo.file.write",
   "repo.file.delete",
+  "verification.execute",
 ] as const;
 
 /**
@@ -61,8 +78,10 @@ export const UNIMPLEMENTED_CAPABILITIES: Readonly<Record<string, string>> = {
     "Phase 4A does not commit, branch, reset or push. Repository history is " +
     "changed by a human, and the read-only git boundary stays intact.",
   "process.execute":
-    "No arbitrary process execution. The only process this system starts is " +
-    "read-only git, from a fixed allowlist (see adapters/repository/gitExec.ts).",
+    "No arbitrary process execution. The processes this system starts are " +
+    "read-only git from a fixed allowlist (adapters/repository/gitExec.ts) and " +
+    "verification checks fixed by trusted configuration - neither lets a " +
+    "caller choose what runs, which is what this capability would mean.",
   "network.access":
     "No network access. No model API, no GitHub, no package registry.",
 };
@@ -75,6 +94,7 @@ export const CAPABILITY_RISK: Readonly<Record<Capability, RiskLevel>> = {
   "repo.file.delete": "HIGH",
   "git.mutate": "HIGH",
   "process.execute": "HIGH",
+  "verification.execute": "HIGH",
   "network.access": "HIGH",
 };
 
@@ -141,9 +161,12 @@ export function capabilityMatrix(): CapabilityStatus[] {
       mutating: isMutating(capability),
       requires: !implemented
         ? "not implemented"
-        : isMutating(capability)
-          ? "a human-approved implementation grant, bound to this run and scope"
-          : "nothing - read-only",
+        : capability === "verification.execute"
+          ? "a human-approved grant, and checks fixed by trusted configuration " +
+            "captured before the run"
+          : isMutating(capability)
+            ? "a human-approved implementation grant, bound to this run and scope"
+            : "nothing - read-only",
       note: UNIMPLEMENTED_CAPABILITIES[capability] ?? null,
     };
   });

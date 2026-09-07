@@ -3,6 +3,7 @@ import { AgentProcessResult } from "./agentProcess.js";
 import { AttributionSummary } from "./attribution.js";
 import { ScopeVerdict } from "./scope.js";
 import { InspectionFailure, GitMutationObservation } from "./repository.js";
+import { VerificationCheckRun } from "./verificationCheck.js";
 
 /**
  * THE VERIFICATION OUTCOME
@@ -104,16 +105,33 @@ export type RepositoryObservation = z.infer<typeof RepositoryObservation>;
 /**
  * Project-declared checks.
  *
- * `available: false` throughout this phase. Running them means executing a
- * command string, which is the arbitrary process execution the capability model
- * refuses - so they are reported as unavailable rather than run, and never
- * reported as passing because an agent said so.
+ * As of Task 005 these are REAL: `available` is true when a human granted
+ * `verification.execute` and the trusted policy carried at least one runnable
+ * definition. What is never true is that an unrun check passed - `allPassed`
+ * is false whenever nothing ran, and an agent saying "tests pass" changes
+ * nothing here.
  */
 export const CheckObservation = z.object({
   declared: z.number().int().nonnegative().default(0),
   executed: z.number().int().nonnegative().default(0),
   available: z.boolean().default(false),
   unavailableReason: z.string().nullable().default(null),
+  /**
+   * The full check run: what was executed and what the OS reported.
+   *
+   * A PROCESS observation, like `process` above - not a repository one. A check
+   * exiting 0 says a program returned zero; what that program did to the
+   * repository is established by inspecting the repository afterwards, which is
+   * a different field entirely.
+   */
+  run: VerificationCheckRun.default(() => VerificationCheckRun.parse({})),
+  /**
+   * True only when every configured check ran and passed.
+   *
+   * FALSE when nothing ran. "No checks" is not "checks passed", and this field
+   * exists so no caller has to remember that.
+   */
+  allPassed: z.boolean().default(false),
 });
 export type CheckObservation = z.infer<typeof CheckObservation>;
 

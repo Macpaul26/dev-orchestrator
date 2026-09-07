@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VerificationCheck } from "./verificationCheck.js";
 
 /** A verification command the project declares. NEVER model-supplied. */
 export const CheckDefinition = z.object({
@@ -38,8 +39,23 @@ export const Project = z.object({
    */
   repoRoot: z.string().nullish(),
   repo: RepoRef.nullish(),
-  /** Verification commands. The allowlist - the only shell the system may run. */
+  /**
+   * LEGACY, RECORDED ONLY - never executed.
+   *
+   * These carry a `command` STRING, which cannot be run without a shell or a
+   * parser. Task 005 does not execute them and does not try to convert them;
+   * they remain as documentation of what a project intends to run.
+   */
   checks: z.array(CheckDefinition).default([]),
+  /**
+   * EXECUTABLE verification checks - the only ones Task 005 will run.
+   *
+   * A separate field from `checks` on purpose. Silently upgrading the legacy
+   * string form into something executable would turn every existing project
+   * config into live process execution the moment this phase shipped, which
+   * nobody would have reviewed. Opting in means writing the safe shape.
+   */
+  verificationChecks: z.array(VerificationCheck).default([]),
   /** Durable constraints a plan must respect. */
   constraints: z.array(z.string()).default([]),
   /** Context files to load, relative to workingDir. */

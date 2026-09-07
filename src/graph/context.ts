@@ -4,6 +4,7 @@ import type { ApprovalRequest, HumanDecision } from "../domain/approval.js";
 import type { OrchestratorStateType } from "./state.js";
 import type { RepositoryInspector } from "../domain/inspector.js";
 import type { CheckRunner } from "../verification/checks.js";
+import type { VerificationCheckPhase } from "../verification/checkPhase.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 
 /**
@@ -21,8 +22,16 @@ export interface NodeContext {
    * git - which is what keeps command construction out of the graph.
    */
   inspector: RepositoryInspector | null;
-  /** Project-declared checks. Disabled in this phase; see verification/checks.ts. */
+  /** LEGACY string-command checks. Still disabled; see verification/checks.ts. */
   checkRunner: CheckRunner;
+  /**
+   * Controlled execution of trusted, predefined verification checks (Task 005).
+   *
+   * Runs only what the captured policy carried, only with a human-granted
+   * `verification.execute`, and is always followed by re-inspecting the
+   * repository - a check is executable code and can change files.
+   */
+  checkPhase: VerificationCheckPhase;
   /**
    * The implementation agent, if one is configured.
    *

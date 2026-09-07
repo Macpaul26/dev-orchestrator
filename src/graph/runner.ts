@@ -18,6 +18,7 @@ import {
 import { createCheckpointer, closeCheckpointer } from "../persistence/checkpointer.js";
 import { createInspectorForProject } from "../adapters/repository/index.js";
 import { DisabledCheckRunner } from "../verification/checks.js";
+import { VerificationCheckPhase } from "../verification/checkPhase.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 import { ClaudeCodeAgent } from "../adapters/claude-code/agent.js";
 import { configFromEnvironment } from "../adapters/claude-code/config.js";
@@ -116,6 +117,7 @@ export class WorkflowRunner {
       inspector: project ? createInspectorForProject(project) : null,
       // Declared checks are recorded, never run. See verification/checks.ts.
       checkRunner: new DisabledCheckRunner(),
+      checkPhase: new VerificationCheckPhase(),
       // Null in production - Phase 4A connects no coding agent. Tests inject a
       // deterministic fake to exercise the capability boundary.
       // An explicitly injected agent wins; otherwise use one the operator

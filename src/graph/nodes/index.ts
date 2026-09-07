@@ -10,6 +10,7 @@ import {
 import { ImplementationReport, ReviewReport } from "../../domain/reports.js";
 import { RepositoryVerifier } from "../../verification/verifier.js";
 import { buildVerificationOutcome } from "../../verification/outcome.js";
+import { capturePolicy } from "../../verification/checkPolicy.js";
 import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
 import { AgentReport } from "../../domain/implementation.js";
 import { issueGrant, grantIdFor } from "../../domain/grant.js";
@@ -101,15 +102,30 @@ export const inspect = (ctx: NodeContext) =>
       ? [
           `project: ${project.name} (${project.id})`,
           `workingDir: ${project.workingDir}`,
-          `checks declared: ${project.checks.length} (execution disabled)`,
+          `legacy string checks: ${project.checks.length} (never executed)`,
+          `verification checks: ${project.verificationChecks.length}`,
           `constraints: ${project.constraints.length}`,
         ]
       : [`project ${state.projectId} not found in store`];
 
+    /**
+     * CAPTURE THE CHECK POLICY HERE - BEFORE THE AGENT EXISTS.
+     *
+     * This node runs before planning, approval and implementation, which is the
+     * whole point: the definitions are read at a moment when nothing untrusted
+     * has had a chance to write to the project. The fingerprint taken here is
+     * what the check phase compares against later.
+     */
+    const policy = capturePolicy(project?.verificationChecks ?? []);
+    observations.push(
+      `check policy captured: ${policy.checks.length} runnable, ` +
+      `${policy.rejected.length} refused, fingerprint ${policy.fingerprint.slice(0, 12)}`,
+    );
+
     if (!ctx.inspector) {
       observations.push("repository inspection unavailable: no inspector configured");
       ctx.emit({ type: "node_completed", runId: state.runId, node: "inspect", at: now() });
-      return { observations, phase: "plan" };
+      return { observations, checkPolicy: policy, phase: "plan" } as OrchestratorUpdate;
     }
 
     const outcome = await ctx.inspector.inspect();
@@ -123,7 +139,10 @@ export const inspect = (ctx: NodeContext) =>
         `repository inspection FAILED (${outcome.failure.code}): ${outcome.failure.message}`,
       );
       ctx.emit({ type: "node_completed", runId: state.runId, node: "inspect", at: now() });
-      return { observations, inspectionFailure: outcome.failure, repository: null, phase: "plan" };
+      return {
+        observations, inspectionFailure: outcome.failure, repository: null,
+        checkPolicy: policy, phase: "plan",
+      } as OrchestratorUpdate;
     }
 
     const evidence = outcome.evidence;
@@ -142,7 +161,10 @@ export const inspect = (ctx: NodeContext) =>
     );
 
     ctx.emit({ type: "node_completed", runId: state.runId, node: "inspect", at: now() });
-    return { observations, repository: evidence, inspectionFailure: null, phase: "plan" };
+    return {
+      observations, repository: evidence, inspectionFailure: null,
+      checkPolicy: policy, phase: "plan",
+    } as OrchestratorUpdate;
   };
 
 // 3 ---------------------------------------------------------------------- plan
@@ -246,7 +268,19 @@ export const approvePlan = (ctx: NodeContext) =>
         approvalId: request.approvalId,
         approvedBy: decision.decidedBy,
         allowedScope: approvedPlan?.allowedScope ?? [],
-        capabilities: ["repo.read", "repo.metadata.read", "repo.file.write", "repo.file.delete"],
+        /**
+         * `verification.execute` is granted by the SAME human decision.
+         *
+         * Deliberately not a separate switch: approving an implementation is
+         * approving that the orchestrator will check the result, and a design
+         * where a human can approve the writing but not the checking invites
+         * exactly the wrong default. It authorises running the policy captured
+         * before this run - nothing else, and nothing the agent can influence.
+         */
+        capabilities: [
+          "repo.read", "repo.metadata.read", "repo.file.write", "repo.file.delete",
+          "verification.execute",
+        ],
       }),
     );
 
@@ -434,7 +468,7 @@ export const verify = (ctx: NodeContext) =>
     }
 
     const verifier = new RepositoryVerifier(ctx.inspector);
-    const result = await verifier.verify({
+    const preCheck = await verifier.verify({
       runId: state.runId,
       // UNTRUSTED inputs, kept strictly on the claimed side.
       claimedSummary: state.implementation?.claimedSummary ?? "",
@@ -445,6 +479,68 @@ export const verify = (ctx: NodeContext) =>
       checksExecuted: executed,
     });
 
+    /**
+     * ---------------------------------------------------------------------
+     * THE CONTROLLED CHECK PHASE (Task 005)
+     * ---------------------------------------------------------------------
+     * Between two independent inspections, and in that order for a reason.
+     *
+     * `preCheck` establishes what the AGENT did. The checks then run. A second
+     * inspection establishes what the repository looks like afterwards, and the
+     * difference between the two is attributable to the CHECKS - because a
+     * verification command is executable code, and "it was only a test" is an
+     * assumption, not an observation.
+     *
+     * Checks are skipped entirely when the repository could not be inspected.
+     * Running code we would then be unable to observe is strictly worse than
+     * not running it: we would have executed something and have no idea what it
+     * did.
+     */
+    const checkRun = await ctx.checkPhase.run({
+      workingDir: project?.workingDir ?? "",
+      grantedCapabilities: state.grant?.capabilities ?? [],
+      policy: state.checkPolicy ?? capturePolicy([]),
+      // Re-read from the project record as it stands NOW. The phase compares
+      // this against the fingerprint captured before implementation.
+      currentChecks: ctx.store.getProject(state.projectId)?.verificationChecks ?? [],
+    });
+
+    /**
+     * POST-CHECK INSPECTION.
+     *
+     * Re-verified against the ORIGINAL baseline, so the final evidence covers
+     * the agent and the checks together - which is what the review gate needs
+     * to reason about the repository's actual end state.
+     */
+    let result = preCheck;
+    let filesChangedByChecks: string[] = [];
+    if (checkRun.attempted) {
+      result = await verifier.verify({
+        runId: state.runId,
+        claimedSummary: state.implementation?.claimedSummary ?? "",
+        claimedFiles: state.implementation?.claimedFiles ?? [],
+        baseline: state.repository,
+        allowedScope: state.proposedPlan?.allowedScope ?? [],
+        checksDeclared: checkRun.declared,
+        checksExecuted: checkRun.executed,
+      });
+      // Attributed against the snapshot taken AFTER the agent and BEFORE the
+      // checks, so anything here belongs to a check rather than to the agent.
+      if (preCheck.observed) {
+        const checkAttribution = await verifier.verify({
+          runId: state.runId,
+          baseline: preCheck.observed,
+          allowedScope: state.proposedPlan?.allowedScope ?? [],
+        });
+        filesChangedByChecks = checkAttribution.evidence.attributableFiles;
+      }
+    }
+
+    const finalCheckRun = {
+      ...checkRun,
+      filesChangedByChecks,
+      repositoryChangedByChecks: filesChangedByChecks.length > 0,
+    };
     if (result.failure) {
       ctx.emit({
         type: "repository_inspection_failed", runId: state.runId, node: "verify",
@@ -480,7 +576,8 @@ export const verify = (ctx: NodeContext) =>
       process: state.implementationRun?.processResult ?? null,
       toolRequestsHandled: (state.implementationRun?.writes ?? 0)
         + (state.implementationRun?.deletes ?? 0),
-      checksDeclared: declaredChecks.length,
+      checksDeclared: finalCheckRun.declared,
+      checkRun: finalCheckRun,
       // What the HUMAN authorised, straight from the grant. Never inferred
       // from what the agent turned out to be able to do.
       grantedCapabilities: state.grant?.capabilities ?? [],
@@ -491,6 +588,7 @@ export const verify = (ctx: NodeContext) =>
       implementation: result.report,
       reviewEvidence: result.evidence,
       verification: outcome,
+      checkRun: finalCheckRun,
       checkResults,
       phase: "review",
     } as OrchestratorUpdate;
@@ -641,6 +739,57 @@ export const review = (ctx: NodeContext) =>
       }
     }
 
+    /**
+     * CHECK RESULTS AT THE GATE.
+     *
+     * A failing check is a blocker; an unrun one is an explicit warning rather
+     * than silence. The difference between "your tests fail" and "we could not
+     * run your tests" is preserved all the way to the human.
+     */
+    const checkRun = outcome?.checks.run;
+    if (checkRun && !checkRun.attempted) {
+      findings.push({
+        severity: "warning",
+        message:
+          "No verification check was executed, so nothing here establishes that " +
+          `the software works. Reason: ${checkRun.notRunReason ?? "not recorded"}`,
+      });
+    }
+    if (checkRun?.policyChangedDuringRun) {
+      findings.push({
+        severity: "blocker",
+        message:
+          "The verification check definitions changed during this run. Neither " +
+          "the captured policy nor the rewritten one was executed - an agent " +
+          "that can rewrite the checks could otherwise have them run as trusted.",
+      });
+    }
+    for (const check of checkRun?.results ?? []) {
+      if (check.status === "passed") {
+        findings.push({
+          severity: "info",
+          message: `Check "${check.checkId}" PASSED (exit 0, ${Math.round(check.durationMs)}ms).`,
+        });
+        continue;
+      }
+      findings.push({
+        severity: check.status === "failed" || check.status === "timed_out"
+          ? "blocker" : "warning",
+        message:
+          `Check "${check.checkId}" ${check.status.toUpperCase()}` +
+          (check.exitCode !== null ? ` (exit ${String(check.exitCode)})` : "") +
+          (check.detail ? `: ${check.detail}` : ""),
+      });
+    }
+    if (checkRun?.repositoryChangedByChecks) {
+      findings.push({
+        severity: "blocker",
+        message:
+          "The verification checks THEMSELVES changed the repository: " +
+          `${checkRun.filesChangedByChecks.join(", ")}. Nothing was reverted.`,
+      });
+    }
+
     for (const disagreement of outcome?.disagreements ?? []) {
       findings.push({ severity: "warning", message: `Disagreement: ${disagreement}` });
     }
@@ -674,8 +823,17 @@ export const review = (ctx: NodeContext) =>
      * This withholds a RECOMMENDATION; it decides nothing. `changes_requested`
      * and `pass` both arrive at the same human gate, and neither can approve.
      */
+    /**
+     * A check that ran and did not pass withholds "pass".
+     *
+     * Note the condition: `attempted && !allPassed`. An unrun check does NOT
+     * force changes_requested by itself - it is reported as a warning, because
+     * "we never checked" is a gap in evidence rather than a defect found.
+     */
+    const checksFailed = (checkRun?.attempted ?? false) && !(outcome?.checks.allPassed ?? false);
     const verdict =
       outcome && isBlocking(outcome.verdict) ? "changes_requested"
+      : checksFailed ? "changes_requested"
       : (outcome?.disagreements.length ?? 0) > 0 ? "changes_requested"
       : drift.length > 0 ? "changes_requested"
       : !evidence || !evidence.inspectionSucceeded ? "changes_requested"
@@ -732,6 +890,17 @@ export const approveReview = (ctx: NodeContext) =>
           gitMutationAuthorised: state.verification?.observation.gitMutationAuthorised ?? false,
           gitMutationReasons: state.verification?.observation.gitMutation.reasons ?? [],
           unauthorisedCommits: state.verification?.observation.gitMutation.newCommits ?? [],
+          checksAttempted: state.verification?.checks.run.attempted ?? false,
+          checksAllPassed: state.verification?.checks.allPassed ?? false,
+          checksNotRunReason: state.verification?.checks.run.notRunReason ?? null,
+          checkResults: (state.verification?.checks.run.results ?? []).map((r) => ({
+            checkId: r.checkId, name: r.name, status: r.status,
+            exitCode: r.exitCode, durationMs: r.durationMs,
+            outputTruncated: r.outputTruncated, detail: r.detail,
+          })),
+          checksChangedRepository:
+            state.verification?.checks.run.repositoryChangedByChecks ?? false,
+          filesChangedByChecks: state.verification?.checks.run.filesChangedByChecks ?? [],
           verifiedIndependently: state.implementation?.verifiedIndependently ?? false,
           observedFileCount: state.implementation?.observedFiles.length ?? 0,
           observedCommitCount: state.implementation?.observedCommits.length ?? 0,

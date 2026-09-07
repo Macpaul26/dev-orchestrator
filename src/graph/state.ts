@@ -6,6 +6,8 @@ import type { ReviewEvidence } from "../domain/evidence.js";
 import type { ImplementationGrant } from "../domain/grant.js";
 import type { ImplementationRun } from "../domain/implementation.js";
 import type { VerificationOutcome } from "../domain/verification.js";
+import type { VerificationCheckRun } from "../domain/verificationCheck.js";
+import type { CheckPolicy } from "../verification/checkPolicy.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
 
 /**
@@ -110,6 +112,20 @@ export const OrchestratorState = Annotation.Root({
    * disabled. The channel exists so a skipped check is recorded explicitly
    * rather than being absent and looking like it was never declared.
    */
+  /**
+   * The check policy captured BEFORE the untrusted implementation runs.
+   *
+   * Held in workflow state, not re-read from disk at execution time, because
+   * the agent can write to disk in between. The fingerprint travels with it so
+   * a mid-run rewrite is detectable rather than executable.
+   */
+  checkPolicy: Annotation<CheckPolicy | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /** What the controlled check phase actually did. Observation, never claim. */
+  checkRun: Annotation<VerificationCheckRun | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
   checkResults: Annotation<CheckResult[]>({
     reducer: (_p, n) => n, default: () => [],
   }),
