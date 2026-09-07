@@ -49,6 +49,18 @@ import {
  * `#` members cannot be reached by any cast or property access.
  *
  * ---------------------------------------------------------------------------
+ * EVERY MESSAGE COSTS BUDGET
+ * ---------------------------------------------------------------------------
+ * The session ceiling counts messages RECEIVED, not operations performed, and
+ * it is charged before anything is parsed. A rejected message costs exactly as
+ * much as an accepted one, because what an agent actually consumes by talking to
+ * us - our attention, and a line in an audit journal that lives on disk - is
+ * spent either way.
+ *
+ * The alternative, counting only successes, leaves the bound evadable by doing
+ * nothing but failing. See `#admit`.
+ *
+ * ---------------------------------------------------------------------------
  * AUTHORISATION IS PER INVOCATION
  * ---------------------------------------------------------------------------
  * Not once at construction. Every call re-enters the session, which re-validates
@@ -72,7 +84,22 @@ export class ToolBridge {
   readonly #maxRequests: number;
   /** Duplicate detection. Bounded by `maxRequests`, so it cannot grow forever. */
   readonly #seen = new Set<string>();
+  /**
+   * EVERY message the child sent, whatever became of it.
+   *
+   * This - not the count of successful operations - is what the session ceiling
+   * bounds. The resource an agent consumes by talking to us is our attention and
+   * our audit log, and it consumes both whether the message was well-formed or
+   * garbage. Counting only successes made the ceiling trivially evadable: a
+   * child could send malformed JSON forever and never spend a single unit of
+   * its stated 10,000-request budget, while every rejection appended a record to
+   * an audit journal that grows on disk without limit.
+   */
+  #received = 0;
+  /** Messages that reached a tool. Reported for observability, not for bounding. */
   #handled = 0;
+  /** Ensures post-ceiling traffic cannot keep appending to the journal. */
+  #ceilingRecorded = false;
   #closed = false;
 
   constructor(options: BridgeOptions) {
@@ -82,8 +109,13 @@ export class ToolBridge {
     this.#maxRequests = options.limits?.maxRequests ?? PROTOCOL_LIMITS.maxRequestsPerSession;
   }
 
+  /** Messages that reached a tool. */
   get requestsHandled(): number {
     return this.#handled;
+  }
+  /** Messages received, valid or not. What the session ceiling bounds. */
+  get requestsReceived(): number {
+    return this.#received;
   }
 
   /** Stop accepting requests. Called when the agent's run ends. */
@@ -104,16 +136,55 @@ export class ToolBridge {
    * fully controls.
    */
   async handleRaw(line: string): Promise<TToolResponse> {
+    const admission = this.#admit("(unparseable)");
+    if (admission) return admission;
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
       return this.#refuse("(unparseable)", "malformed_json", "request was not valid JSON");
     }
-    return this.handle(parsed);
+    return this.#process(parsed);
   }
 
   async handle(raw: unknown): Promise<TToolResponse> {
+    const admission = this.#admit(extractRequestId(raw));
+    if (admission) return admission;
+    return this.#process(raw);
+  }
+
+  /**
+   * Charge one unit of session budget, and refuse if it is spent.
+   *
+   * Called exactly once per message, by each public entry point, BEFORE any
+   * parsing or validation. That ordering is the whole point: it is what makes
+   * the ceiling a bound on what the child can make us do, rather than a bound on
+   * what it can successfully do.
+   *
+   * @returns a refusal when the message must not be processed, else null.
+   */
+  #admit(requestId: string): TToolResponse | null {
+    this.#received += 1;
+    if (this.#received <= this.#maxRequests) return null;
+
+    /**
+     * Past the ceiling the refusal is still returned - the child gets a real,
+     * correlated answer - but it is journalled only ONCE. Otherwise a child that
+     * kept talking after being cut off could still grow the audit log on disk
+     * indefinitely, which is the same unbounded resource by another route.
+     */
+    const record = !this.#ceilingRecorded;
+    this.#ceilingRecorded = true;
+    return this.#refuse(
+      requestId,
+      "too_many_requests",
+      `this session may make at most ${this.#maxRequests} requests`,
+      record,
+    );
+  }
+
+  async #process(raw: unknown): Promise<TToolResponse> {
     // ---- 1. shape ---------------------------------------------------------
     const envelope = ToolRequest.safeParse(raw);
     if (!envelope.success) {
@@ -143,12 +214,8 @@ export class ToolBridge {
       // not merely be noticed once it has.
       return this.#refuse(request.requestId, "cancelled", "the run was cancelled");
     }
-    if (this.#handled >= this.#maxRequests) {
-      return this.#refuse(
-        request.requestId, "too_many_requests",
-        `this session may make at most ${this.#maxRequests} requests`,
-      );
-    }
+    // The ceiling is enforced in `#admit`, before this point, so that malformed
+    // and rejected traffic is charged for too.
     if (this.#seen.has(request.requestId)) {
       // A replayed id would let one response be matched to two operations.
       return this.#refuse(
@@ -286,7 +353,11 @@ export class ToolBridge {
 
   #refuse(
     requestId: string, code: ToolErrorCode, message: string,
+    record = true,
   ): TToolResponse {
+    if (!record) {
+      return ToolResponse.parse({ requestId, ok: false, result: null, error: { code, message } });
+    }
     this.#journal?.append({
       type: "bridge_request_rejected",
       runId: this.#session.runId,

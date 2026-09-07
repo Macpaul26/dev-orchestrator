@@ -209,7 +209,10 @@ export class ClaudeCodeAgent implements ImplementationAgent {
       files: claimed?.files ?? [],
       claimsSuccess: claimed?.claimsSuccess ?? false,
       notes: [
-        `tool requests handled by the orchestrator: ${bridge.requestsHandled}`,
+        // Both numbers, because they answer different questions: how much the
+        // agent actually achieved, and how much of its budget it spent trying.
+        `tool requests received by the orchestrator: ${bridge.requestsReceived}`,
+        `tool requests that reached a tool: ${bridge.requestsHandled}`,
         `process ${outcome.result.status}` +
           (outcome.result.exitCode !== null ? ` (exit ${outcome.result.exitCode})` : "") +
           (outcome.result.signal !== null ? ` (signal ${outcome.result.signal})` : ""),

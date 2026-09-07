@@ -257,6 +257,41 @@ describe("a real hostile child cannot cross the boundary", () => {
     expect(exists("src/two.ts")).toBe(false);
   });
 
+  it("is charged budget for malformed traffic, through the real transport", async () => {
+    // The unit tests prove the accounting; this proves it survives the pipe,
+    // the framing and the adapter - that a real child flooding garbage spends
+    // its budget rather than getting an unlimited free ride.
+    const dump = path.join(parent, "flood-resp.json");
+    const garbage = Array.from({ length: 25 }, (_, i) => `}{ garbage ${i}`);
+    const grant = makeGrant();
+    const agent = new ClaudeCodeAgent(
+      configFor({
+        toolRequests: [
+          ...garbage,
+          // A legitimate request AFTER the garbage: the channel must recover.
+          request("write_file", { path: "src/after-flood.ts", contents: "ok\n" }),
+        ],
+        dumpResponsesTo: dump,
+      }),
+      journal(),
+    );
+
+    const result = await runner.run(grant, { instruction: "flood" }, agent);
+
+    const notes = result.agentReport.notes.join(" ");
+    // Every message was charged, not just the one that worked.
+    expect(notes).toContain("tool requests received by the orchestrator: 26");
+    expect(notes).toContain("tool requests that reached a tool: 1");
+
+    // Malformed traffic does not break the channel for legitimate work.
+    expect(exists("src/after-flood.ts")).toBe(true);
+    expect(result.run.status).toBe("completed");
+
+    // And every message still got an answer.
+    const responses = JSON.parse(fs.readFileSync(dump, "utf8")) as string[];
+    expect(responses.length).toBe(26);
+  }, 60_000);
+
   it("cannot exhaust memory with an unterminated protocol line", async () => {
     // 2 MB with no newline, against a 1 MB line limit.
     const grant = makeGrant();

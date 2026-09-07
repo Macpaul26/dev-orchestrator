@@ -175,9 +175,34 @@ counted against the same budget.
 | One protocol line | 1 MB — **enforced by the framing layer** |
 | Path | 4096 chars |
 | `write_file` contents | 1 MB (the grant's limit is separate and lower) |
-| Requests per session | 10,000 |
+| Requests per session | 10,000 — **charged on receipt**, see below |
 | `read_file` response | 256 KB |
 | `list_directory` response | 500 entries |
+
+### Every message costs budget
+
+The session ceiling counts messages **received**, not operations performed, and
+it is charged **before anything is parsed**. A rejected message costs exactly as
+much as an accepted one.
+
+That is a correction. The first implementation charged only for requests that
+reached a tool, which left the ceiling evadable by doing nothing but failing: a
+child could send malformed JSON forever and never spend a single unit of its
+stated 10,000-request budget. The consequence was worse than wasted CPU —
+**every rejection appended a record to an audit journal that lives on disk**, so
+unbounded invalid traffic meant unbounded disk growth.
+
+Two counters now exist, because they answer different questions:
+
+| Counter | Meaning |
+| --- | --- |
+| `requestsReceived` | every message, whatever became of it — **what the ceiling bounds** |
+| `requestsHandled` | messages that reached a tool — observability only |
+
+Past the ceiling a refusal is still returned, so the child is never left hanging
+on an unanswered request — but it is **journalled only once**, which bounds
+bridge-written audit records at `maxRequests + 1`. A well-behaved client is not
+penalised: exactly *N* valid requests all succeed.
 
 `BoundedLineReader` throws once a pending fragment passes the limit rather than
 growing the buffer — a child that writes gigabytes and never sends a newline

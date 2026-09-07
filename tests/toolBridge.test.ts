@@ -78,6 +78,8 @@ const req = (tool: string, args: unknown) => ({
 });
 
 const exists = (rel: string) => fs.existsSync(path.join(repo, rel));
+const journalRecords = () =>
+  new ActivityJournal(store.activityFile("proj", RUN)).read();
 
 beforeEach(() => {
   parent = tmpDir("orch-bridge-");
@@ -517,6 +519,153 @@ describe("protocol hardening", () => {
     expect(response.ok).toBe(false);
     expect(response.error?.code).toBe("invalid_arguments");
     expect(exists("src/huge.ts")).toBe(false);
+  });
+
+  /**
+   * THE RESOURCE CEILING CANNOT BE EVADED BY FAILING.
+   *
+   * The first implementation charged budget only for requests that reached a
+   * tool, so every rejection was free: a child could send malformed JSON
+   * forever without spending a single unit of its stated budget, while each
+   * rejection appended a line to an audit journal that grows on disk.
+   *
+   * These tests assert the property that closes it - EVERY message costs one
+   * unit, whatever becomes of it - rather than asserting where a counter is
+   * incremented.
+   */
+  describe("every message costs budget, whatever its fate", () => {
+    /** One kind of invalid traffic, and how it is sent. */
+    const INVALID: [string, (bridge: ToolBridge) => Promise<unknown>][] = [
+      ["malformed JSON", (b) => b.handleRaw("{ not json")],
+      ["empty line", (b) => b.handleRaw("")],
+      ["non-object JSON", (b) => b.handleRaw("42")],
+      ["missing requestId", (b) => b.handle({ tool: "read_file", arguments: { path: "a" } })],
+      ["unknown tool", (b) => b.handle(req("execute", { command: "x" }))],
+      ["forged authority field", (b) =>
+        b.handle({ ...req("read_file", { path: "src/existing.ts" }), grantId: "grn_x" })],
+      ["invalid arguments", (b) => b.handle(req("read_file", { path: 42 }))],
+      ["oversized path", (b) =>
+        b.handle(req("read_file", { path: "a".repeat(PROTOCOL_LIMITS.maxPathLength + 1) }))],
+    ];
+
+    for (const [label, send] of INVALID) {
+      it(`charges one unit for ${label}`, async () => {
+        const { session } = buildSession();
+        const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 2 } });
+
+        await send(bridge);
+        expect(bridge.requestsReceived).toBe(1);
+
+        // The budget really is spent: one more invalid message exhausts it, and
+        // a perfectly VALID request is then refused.
+        await send(bridge);
+        expect(bridge.requestsReceived).toBe(2);
+
+        const valid = await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+        expect(valid.ok).toBe(false);
+        expect(valid.error?.code).toBe("too_many_requests");
+      });
+    }
+
+    it("cannot be evaded by a long stream of malformed traffic", async () => {
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 5 } });
+
+      for (let i = 0; i < 200; i += 1) await bridge.handleRaw("}{ garbage");
+
+      expect(bridge.requestsReceived).toBe(200);
+      expect(bridge.requestsHandled).toBe(0);
+      const after = await bridge.handle(req("write_file", { path: "src/x.ts", contents: "x" }));
+      expect(after.error?.code).toBe("too_many_requests");
+      expect(exists("src/x.ts")).toBe(false);
+    });
+
+    it("charges for duplicate ids", async () => {
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 3 } });
+      const same = { requestId: "dup", tool: "read_file", arguments: { path: "src/existing.ts" } };
+
+      expect((await bridge.handle(same)).ok).toBe(true);
+      await bridge.handle(same);
+      await bridge.handle(same);
+      expect(bridge.requestsReceived).toBe(3);
+
+      const beyond = await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      expect(beyond.error?.code).toBe("too_many_requests");
+    });
+
+    it("charges for requests sent after cancellation", async () => {
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 2 } });
+      cancellation.cancel("stopped");
+
+      await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      expect(bridge.requestsReceived).toBe(2);
+
+      const beyond = await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      // Budget is exhausted, so the ceiling now answers before cancellation does.
+      expect(beyond.error?.code).toBe("too_many_requests");
+    });
+
+    it("charges for requests sent after close", async () => {
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 2 } });
+      bridge.close();
+
+      await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      const beyond = await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      expect(bridge.requestsReceived).toBe(3);
+      expect(beyond.error?.code).toBe("too_many_requests");
+    });
+
+    it("BOUNDS the audit journal, so post-ceiling traffic cannot grow it", async () => {
+      // The consequence that made this more than a CPU concern: every refusal
+      // used to append a record, so unbounded rejected traffic meant unbounded
+      // disk growth.
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 4 } });
+
+      const before = journalRecords().length;
+      for (let i = 0; i < 300; i += 1) await bridge.handleRaw("garbage");
+      const written = journalRecords().length - before;
+
+      expect(bridge.requestsReceived).toBe(300);
+      // 4 charged refusals, plus exactly one record for breaching the ceiling.
+      expect(written).toBeLessThanOrEqual(5);
+    });
+
+    it("does NOT penalise a well-behaved client", async () => {
+      // The bound must not cost a legitimate agent anything: exactly N valid
+      // requests must all succeed.
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 4 } });
+
+      for (let i = 0; i < 4; i += 1) {
+        const response = await bridge.handle(
+          req("write_file", { path: `src/ok${i}.ts`, contents: "x" }),
+        );
+        expect(response.ok, `request ${i} should be allowed`).toBe(true);
+      }
+      expect(bridge.requestsReceived).toBe(4);
+      expect(bridge.requestsHandled).toBe(4);
+
+      const fifth = await bridge.handle(req("write_file", { path: "src/ok4.ts", contents: "x" }));
+      expect(fifth.error?.code).toBe("too_many_requests");
+      expect(exists("src/ok4.ts")).toBe(false);
+    });
+
+    it("still answers every message, so the child is never left hanging", async () => {
+      const { session } = buildSession();
+      const bridge = new ToolBridge({ session, cancellation, journal, limits: { maxRequests: 1 } });
+      await bridge.handleRaw("garbage");
+
+      const refused = await bridge.handle(req("read_file", { path: "src/existing.ts" }));
+      expect(refused.ok).toBe(false);
+      expect(refused.requestId).toBeTruthy();
+      expect(refused.error?.message).toBeTruthy();
+    });
   });
 
   it("caps the number of requests one session may make", async () => {
