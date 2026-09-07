@@ -30,14 +30,41 @@ import { z } from "zod";
  * a field somebody later decides to honour.
  */
 
-/** Hard ceilings. Not configurable - editing this file is the only way past. */
+/**
+ * Hard ceilings. Not configurable - editing this file is the only way past.
+ *
+ * ---------------------------------------------------------------------------
+ * EVERY "BYTES" LIMIT MEANS UTF-8 BYTES
+ * ---------------------------------------------------------------------------
+ * Not JavaScript string length, which counts UTF-16 code units. The two differ
+ * for any non-ASCII text - a single CJK character is one unit of `.length` and
+ * three UTF-8 bytes - so counting characters against a byte ceiling silently
+ * lets roughly three times the intended volume through on such content.
+ * Accounting uses `Buffer.byteLength(text, "utf8")` throughout.
+ */
 export const EVIDENCE_LIMITS = {
   /** Most evidence items one request batch may return. */
   maxItems: 50,
-  /** Bytes of file text any single excerpt may carry. */
+  /** UTF-8 bytes of file text any single excerpt may carry. */
   maxExcerptBytes: 8 * 1024,
-  /** Bytes of file text ALL excerpts in one batch may carry, together. */
+  /** UTF-8 bytes of file text ALL excerpts in one batch may carry, together. */
   maxTotalExcerptBytes: 32 * 1024,
+  /**
+   * THE TOTAL EVIDENCE PAYLOAD one batch may produce, in UTF-8 bytes.
+   *
+   * Covers everything the service hands back - items, paths, metadata, excerpt
+   * text and refusal messages - not just excerpts. Without it, a batch could
+   * stay comfortably inside every individual limit and still return a very
+   * large result: two hundred long paths, fifty metadata items and fifty
+   * refusal messages each cost nothing against `maxTotalExcerptBytes`.
+   *
+   * This is a RESOURCE bound at the service boundary and is deliberately
+   * distinct from the Task 007 context budget, which is a SEMANTIC bound on how
+   * much material the orchestrator will reason over. Evidence passes through
+   * both; neither substitutes for the other, and relying on the downstream one
+   * would mean the service itself was unbounded.
+   */
+  maxTotalEvidenceBytes: 128 * 1024,
   /** Longest repository-relative path this service will consider. */
   maxPathLength: 400,
   /** Changed-file entries reported in one CHANGED_FILES item. */
@@ -151,8 +178,16 @@ export const FileExcerptEvidence = z.object({
   kind: z.literal("FILE_EXCERPT"),
   path: z.string(),
   start: z.literal(0),
-  /** Bytes actually returned. */
+  /** UTF-8 bytes actually returned. */
   end: z.number().int().nonnegative(),
+  /**
+   * The excerpt text.
+   *
+   * The schema bound is a coarse backstop in UTF-16 units - Zod cannot express
+   * a UTF-8 byte limit. The real bound is applied by the service, which reads
+   * at most the remaining allowance in bytes and then trims to a whole number
+   * of UTF-8 characters. `end` is the authoritative byte count.
+   */
   text: z.string().max(EVIDENCE_LIMITS.maxExcerptBytes),
   /** True when the file is longer than what was returned. Never implicit. */
   truncated: z.boolean().default(false),
@@ -186,6 +221,13 @@ export const EvidenceRefusalCode = z.enum([
   "unreadable",
   "credential_shaped_content",
   "excerpt_budget_exhausted",
+  /**
+   * The TOTAL evidence payload budget was reached.
+   *
+   * Distinct from `excerpt_budget_exhausted`, which is about file text alone.
+   * This one can be hit by paths and metadata with no excerpt in sight.
+   */
+  "evidence_budget_exhausted",
   "item_limit_exceeded",
   "inspection_failed",
 ]);
@@ -211,8 +253,20 @@ export const EvidenceOutcome = z.object({
   items: z.array(EvidenceItem).max(EVIDENCE_LIMITS.maxItems).default([]),
   /** Every refusal, reported. Nothing is dropped silently. */
   refusals: z.array(EvidenceRefusal).max(EVIDENCE_LIMITS.maxItems).default([]),
-  /** Excerpt bytes spent, so the budget is visible rather than implicit. */
+  /** Excerpt UTF-8 bytes spent, so the budget is visible rather than implicit. */
   excerptBytesUsed: z.number().int().nonnegative().default(0),
+  /** Total evidence UTF-8 bytes spent, against `maxTotalEvidenceBytes`. */
+  evidenceBytesUsed: z.number().int().nonnegative().default(0),
+  /**
+   * True when a budget stopped this batch returning something it otherwise
+   * would have.
+   *
+   * The point of the flag: "there was no more evidence" and "there was more
+   * evidence and we would not return it" must never look the same. Every
+   * individual omission is also a refusal record; this makes the condition
+   * visible at a glance without reading them.
+   */
+  budgetLimited: z.boolean().default(false),
   collectedAt: z.string().datetime(),
 }).strict();
 export type EvidenceOutcome = z.infer<typeof EvidenceOutcome>;

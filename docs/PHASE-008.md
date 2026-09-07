@@ -104,22 +104,77 @@ context assembler rather than duplicated — the one change made to existing cod
 
 ## 7. Bounds
 
-`EVIDENCE_LIMITS` — centralized, not configurable by anything downstream.
+`EVIDENCE_LIMITS` - centralized, not configurable by callers, the model, project
+data or agent output.
 
 ```
-maxItems 50            maxExcerptBytes 8 KB      maxTotalExcerptBytes 32 KB
-maxPathLength 400      maxChangedFiles 200       maxMetadataPaths 50
-maxRequests 50
+maxItems 50                  maxExcerptBytes 8 KB      maxTotalExcerptBytes 32 KB
+maxTotalEvidenceBytes 128 KB maxPathLength 400         maxChangedFiles 200
+maxMetadataPaths 50          maxRequests 50
 ```
 
-**The excerpt read is bounded at the read itself**, not read-then-sliced. The
-service holds its own `SafeFs` constructed with `maxFileBytes` set to the excerpt
-cap, so `readPrefix` opens and reads 8 KB — it never pulls a larger file into
-memory first. Same Phase 3 code path, tighter configuration.
+### Every "bytes" limit means UTF-8 bytes
 
-**No silent truncation.** Every drop is either an explicit `truncated: true` on
-the item or a refusal in `outcome.refusals`. A budget exhausted mid-batch is
-reported, not quietly shorter.
+Not JavaScript string length, which counts UTF-16 code units. A CJK character is
+one unit of `.length` and three UTF-8 bytes, so counting characters against a
+byte ceiling lets roughly three times the intended volume through on non-ASCII
+content. Accounting uses `Buffer.byteLength(text, "utf8")` throughout, and
+`FileExcerptEvidence.end` is the authoritative byte count.
+
+Trimming never splits a character. A byte-bounded read can cut a UTF-8 sequence
+in half, and decoding the remainder yields U+FFFD - which is **three** bytes, so
+a naive truncation can end up larger than the limit it was enforcing.
+`truncateToBytes` walks back over trailing continuation bytes and drops an
+incomplete sequence rather than letting it decode.
+
+### The excerpt read is bounded by the REMAINING allowance
+
+The service builds its `SafeFs` per request with `maxFileBytes` set to
+
+```
+min(request.maxBytes, maxExcerptBytes, maxTotalExcerptBytes - excerptBytesUsed)
+```
+
+so `readPrefix` opens and reads exactly that many bytes.
+
+This was wrong in the first implementation and the review caught it: the reader
+was constructed once with the 8 KB per-excerpt cap, so with 512 bytes of batch
+budget remaining it still pulled 8 KB off disk and sliced afterwards. The
+original report described that as "bounded at the read", which was true only
+against the 8 KB cap and not against the remaining allowance. The test asserts on
+the limit the reader is *constructed* with, not on the length of the returned
+string - a short string proves only that slicing happened.
+
+### Two budgets, two boundaries
+
+| Budget | Owner | Question |
+| --- | --- | --- |
+| `maxTotalEvidenceBytes` | evidence service | how much payload may this batch produce |
+| Task 007 `maxTotalChars` | context assembler | how much material will the orchestrator reason over |
+
+The first is a **resource** bound at the service boundary; the second is a
+**semantic** bound downstream. Evidence passes through both, and relying on the
+downstream one would have left the service itself unbounded.
+
+`maxTotalEvidenceBytes` covers everything returned - items, paths, metadata,
+excerpt text and refusal messages. It is a **real constraint, not decoration**:
+the worst case the sibling limits permit (200 max-length paths, 50 metadata
+items, a full excerpt budget) comes to roughly 139 KB against the 128 KB ceiling,
+so it can bind. A test asserts that arithmetic rather than claiming the budget
+never binds.
+
+### Accounting happens before construction
+
+Items and refusals are charged by serialized size **before** admission.
+`CHANGED_FILES` admits paths one at a time while they fit; `FILE_METADATA`
+checks each item before the stat joins the batch. Nothing assembles a large
+result and discovers afterwards that it was over budget, and no unbounded
+intermediate exists on the way to finding out.
+
+**No silent truncation.** Every drop is an explicit `truncated: true` on the
+item, a refusal in `outcome.refusals`, or both - plus `budgetLimited` on the
+outcome, so "there was no more evidence" and "more existed and was withheld"
+never look the same.
 
 ## 8. Determinism
 
@@ -176,20 +231,23 @@ that the capability matrix is unchanged.
 
 ## 13. Known limitations
 
-1. **Prompt injection is not solved.** See §11.
+1. **The total evidence budget can bind on a pathological batch**, and when it
+   does the result is genuinely incomplete - reported, but incomplete. That is
+   the intended trade: bounded and honest beats complete and unbounded.
+3. **Prompt injection is not solved.** See §11.
 2. **The secret detector is shape-based.** It catches recognisable formats; a
    secret that reads as ordinary prose passes. The real protections are the path
    policy and not sending contents where they are not needed.
-3. **Excerpts are prefix-only**, so evidence about the middle of a large file is
+4. **Excerpts are prefix-only**, so evidence about the middle of a large file is
    unavailable. Deliberate — see §3.
-4. **`FILE_EXCERPT` is unused by the reasoning path.** The capability exists and
+5. **`FILE_EXCERPT` is unused by the reasoning path.** The capability exists and
    is tested; nothing currently decides which files deserve one.
-5. **Binary and non-UTF-8 files are refused, not summarised.** A repository whose
+6. **Binary and non-UTF-8 files are refused, not summarised.** A repository whose
    interesting content is binary yields metadata only.
-6. **Evidence is a snapshot.** It is gathered once per plan step; the repository
+7. **Evidence is a snapshot.** It is gathered once per plan step; the repository
    can change immediately afterwards, and independent verification after
    implementation remains the authority on what actually happened.
-7. **`CHANGED_FILES` returns paths, never diffs.** What changed inside a file is
+8. **`CHANGED_FILES` returns paths, never diffs.** What changed inside a file is
    not available to reasoning at all.
-8. **No new capability was added**, and none of this grants anything: repository
+9. **No new capability was added**, and none of this grants anything: repository
    evidence is information, and information is not authority.
