@@ -52,7 +52,57 @@ export const CHECK_CEILINGS = {
   /** Longest argv a definition may carry. */
   maxArgs: 64,
   maxArgLength: 4 * 1024,
+  /**
+   * Largest executable the orchestrator will hash for an identity.
+   *
+   * Generous - a real interpreter is tens of megabytes - but bounded, because
+   * hashing is streamed and must still terminate. Beyond this the identity
+   * cannot be established, and a check whose identity cannot be established is
+   * BLOCKED rather than run: failing closed is the only safe direction here.
+   */
+  maxExecutableHashBytes: 1024 * 1024 * 1024,
 } as const;
+
+/**
+ * WHICH FILE THE TRUSTED EXECUTABLE ACTUALLY WAS.
+ *
+ * The policy fingerprint protects the check DEFINITION - id, executable path,
+ * argv, cwd, timeout. It says nothing about the bytes at that path, so this is
+ * entirely possible:
+ *
+ *   trusted policy names /project/tools/check.js   (fingerprint stable)
+ *   agent gets write authority
+ *   agent replaces check.js with its own program   (fingerprint STILL stable)
+ *   orchestrator confirms check.js exists
+ *   orchestrator executes the replacement, as trusted verification
+ *
+ * `fs.statSync` establishes only that SOMETHING is there. This establishes that
+ * it is the SAME something, by content.
+ *
+ * Deliberately NOT part of the policy fingerprint: a changed executable and a
+ * changed policy are different failures with different causes, and collapsing
+ * them would report a replaced binary as "the definitions changed".
+ *
+ * This is an ORCHESTRATOR OBSERVATION, never configuration. No project field
+ * and no agent input can supply or override it - `.strict()` means a config
+ * file carrying one of these is rejected rather than believed.
+ */
+export const VerificationExecutableIdentity = z.object({
+  /** The configured path, as written in the trusted policy. */
+  path: z.string().min(1),
+  /**
+   * The path after resolving links.
+   *
+   * Recorded separately so swapping the file for a symlink to a different
+   * program is visible even in the pathological case where the two happen to
+   * hash the same.
+   */
+  resolvedPath: z.string().min(1),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/, "sha256 must be 64 lower-case hex characters"),
+  sizeBytes: z.number().int().nonnegative(),
+  capturedAt: z.string().datetime(),
+}).strict();
+export type VerificationExecutableIdentity = z.infer<typeof VerificationExecutableIdentity>;
 
 export const VerificationCheck = z.object({
   /** Stable identifier, used to match results to definitions across a restart. */
@@ -133,6 +183,17 @@ export const CheckBlockReason = z.enum([
   "invalid_definition",
   "executable_not_absolute",
   "executable_missing",
+  /**
+   * The executable is not the file that was trusted before implementation.
+   *
+   * Its own reason rather than `error` or `executable_missing`: those say the
+   * program could not run, this says the program is not the one we agreed to
+   * run. The security significance is the whole point and must not be lost in
+   * a generic failure.
+   */
+  "executable_integrity_changed",
+  /** The trusted identity could not be established. Fail closed, never run. */
+  "executable_identity_unavailable",
   "working_directory_escape",
   "policy_changed_during_run",
   "run_budget_exhausted",
@@ -179,6 +240,15 @@ export const VerificationCheckResult = z.object({
 
   /** Set only when the check could not be attempted. */
   blockedReason: CheckBlockReason.nullable().default(null),
+  /**
+   * Truncated digests for an integrity block, so a human can see the mismatch.
+   *
+   * Truncated because the full digest is not needed to communicate "these are
+   * different", and short values keep the review output readable. The
+   * executable's CONTENTS are never captured - only what it hashes to.
+   */
+  expectedSha256: z.string().nullable().default(null),
+  observedSha256: z.string().nullable().default(null),
   /** Short, non-disclosing. Never a buffer, never file content. */
   detail: z.string().nullable().default(null),
 

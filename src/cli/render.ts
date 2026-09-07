@@ -105,9 +105,11 @@ export function renderApproval(request: ApprovalRequest): void {
      * layout has to make that obvious - the agent's claim is labelled a claim,
      * and these carry exit codes.
      */
-    const results = (verification["checkResults"] as
-      { checkId: string; status: string; exitCode: number | null; durationMs: number }[]
-      | undefined) ?? [];
+    const results = (verification["checkResults"] as {
+      checkId: string; status: string; exitCode: number | null; durationMs: number;
+      blockedReason?: string | null;
+      expectedSha256?: string | null; observedSha256?: string | null;
+    }[] | undefined) ?? [];
     if (verification["checksAttempted"] === true) {
       line(`    project checks: ${results.length} executed` +
         (verification["checksAllPassed"] === true ? ", ALL PASSED" : ", NOT ALL PASSED"));
@@ -118,6 +120,15 @@ export function renderApproval(request: ApprovalRequest): void {
           (check.exitCode !== null ? ` (exit ${String(check.exitCode)})` : "") +
           ` ${seconds}s`,
         );
+        // Digests, never contents. Enough to see that two things differ.
+        if (check.blockedReason === "executable_integrity_changed"
+          || check.blockedReason === "executable_identity_unavailable") {
+          line("        VERIFICATION EXECUTABLE INTEGRITY FAILED");
+          line("        the executable is not the program trusted before implementation");
+          if (check.expectedSha256) line(`        expected sha256: ${check.expectedSha256}...`);
+          if (check.observedSha256) line(`        observed sha256: ${check.observedSha256}...`);
+          line("        execution: NOT STARTED");
+        }
       }
       if (verification["checksChangedRepository"] === true) {
         const changed = (verification["filesChangedByChecks"] as string[] | undefined) ?? [];

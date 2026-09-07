@@ -772,6 +772,28 @@ export const review = (ctx: NodeContext) =>
         });
         continue;
       }
+      /**
+       * AN INTEGRITY BLOCK IS A SECURITY FINDING, NOT A FAILED TEST.
+       *
+       * Raised as a blocker with the digests shown, because "your check did not
+       * pass" and "the check program was swapped out from under us" call for
+       * completely different responses from a human.
+       */
+      if (check.blockedReason === "executable_integrity_changed"
+        || check.blockedReason === "executable_identity_unavailable") {
+        findings.push({
+          severity: "blocker",
+          message:
+            `Check "${check.checkId}" BLOCKED: the verification executable is not ` +
+            `the program that was trusted before implementation. ${check.detail ?? ""} ` +
+            (check.expectedSha256 && check.observedSha256
+              ? `Expected sha256 ${check.expectedSha256}..., observed ` +
+                `${check.observedSha256}.... `
+              : "") +
+            "Execution NOT STARTED.",
+        });
+        continue;
+      }
       findings.push({
         severity: check.status === "failed" || check.status === "timed_out"
           ? "blocker" : "warning",
@@ -897,6 +919,10 @@ export const approveReview = (ctx: NodeContext) =>
             checkId: r.checkId, name: r.name, status: r.status,
             exitCode: r.exitCode, durationMs: r.durationMs,
             outputTruncated: r.outputTruncated, detail: r.detail,
+            // Truncated digests only. The executable contents are never read
+            // into evidence - only what they hash to.
+            blockedReason: r.blockedReason,
+            expectedSha256: r.expectedSha256, observedSha256: r.observedSha256,
           })),
           checksChangedRepository:
             state.verification?.checks.run.repositoryChangedByChecks ?? false,

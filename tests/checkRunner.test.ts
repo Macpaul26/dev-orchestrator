@@ -5,7 +5,9 @@ import process from "node:process";
 import {
   ControlledCheckRunner, buildCheckEnvironment, resolveCheckCwd,
 } from "../src/verification/checkRunner.js";
-import { capturePolicy, validateCheck, fingerprintPolicy } from "../src/verification/checkPolicy.js";
+import {
+  capturePolicy, validateCheck, fingerprintPolicy, captureExecutableIdentity,
+} from "../src/verification/checkPolicy.js";
 import { VerificationCheck, CHECK_CEILINGS } from "../src/domain/verificationCheck.js";
 import { tmpDir, rmDir, linkDir, DIR_LINKS_SUPPORTED } from "./helpers.js";
 
@@ -25,6 +27,24 @@ import { tmpDir, rmDir, linkDir, DIR_LINKS_SUPPORTED } from "./helpers.js";
 
 let tmp: string;
 const runner = new ControlledCheckRunner();
+
+/**
+ * The trusted identity of the node binary these tests launch.
+ *
+ * Task 005-CORRECTION made this a REQUIRED input: the runner refuses to launch
+ * an executable it cannot confirm is the one that was trusted before the
+ * implementation ran. Computed once, since it does not change during a run.
+ */
+const nodeIdentity = (() => {
+  const captured = captureExecutableIdentity(process.execPath);
+  if (!captured.ok) throw new Error("could not fingerprint the node binary for tests");
+  return captured.identity;
+})();
+
+/** Run options carrying the trusted identity - the normal, authorised case. */
+function trusted(extra: Record<string, unknown> = {}) {
+  return { workingDir: tmp, expectedIdentity: nodeIdentity, ...extra };
+}
 
 /** A check that runs a snippet of JavaScript in a real child process. */
 function nodeCheck(id: string, script: string, overrides: Record<string, unknown> = {}) {
@@ -146,7 +166,7 @@ describe("no shell, ever", () => {
       id: "inject", name: "inject", executable: process.execPath,
       args: ["-e", "process.stdout.write(process.argv[1] ?? \"\")", `; touch ${marker}`],
     });
-    const result = await runner.run(check, { workingDir: tmp });
+    const result = await runner.run(check, trusted());
 
     expect(result.status).toBe("passed");
     expect(fs.existsSync(path.join(tmp, "injected.txt"))).toBe(false);
@@ -159,7 +179,7 @@ describe("no shell, ever", () => {
       id: "expand", name: "expand", executable: process.execPath,
       args: ["-e", "process.stdout.write(process.argv[1] ?? \"\")", "$HOME|$PATH"],
     });
-    const result = await runner.run(check, { workingDir: tmp });
+    const result = await runner.run(check, trusted());
     expect(result.outputExcerpt).toContain("$HOME|$PATH");
   });
 
@@ -169,7 +189,7 @@ describe("no shell, ever", () => {
       id: "chain", name: "chain", executable: process.execPath,
       args: ["-e", "process.exit(0)", "&&", "node", "-e", `require("fs").writeFileSync("${marker}","x")`],
     });
-    await runner.run(check, { workingDir: tmp });
+    await runner.run(check, trusted());
     expect(fs.existsSync(path.join(tmp, "chained.txt"))).toBe(false);
   });
 });
@@ -206,7 +226,7 @@ describe("working-directory containment", () => {
   it("blocks the check rather than running it elsewhere", async () => {
     const result = await runner.run(
       nodeCheck("escape", "process.exit(0)", { cwd: "../.." }),
-      { workingDir: tmp },
+      trusted(),
     );
     expect(result.status).toBe("blocked");
     expect(result.blockedReason).toBe("working_directory_escape");
@@ -247,7 +267,7 @@ describe("environment isolation", () => {
     try {
       const result = await runner.run(
         nodeCheck("env", "process.stdout.write(JSON.stringify(Object.keys(process.env)))"),
-        { workingDir: tmp },
+        trusted(),
       );
       expect(result.status).toBe("passed");
       expect(result.outputExcerpt).not.toContain("ORCH_TEST_FAKE_API_KEY");
@@ -269,13 +289,13 @@ describe("environment isolation", () => {
 // ===========================================================================
 describe("execution outcomes are distinguished, not collapsed", () => {
   it("exit 0 is passed", async () => {
-    const result = await runner.run(nodeCheck("ok", "process.exit(0)"), { workingDir: tmp });
+    const result = await runner.run(nodeCheck("ok", "process.exit(0)"), trusted());
     expect(result.status).toBe("passed");
     expect(result.exitCode).toBe(0);
   });
 
   it("exit non-zero is failed - the code is at fault", async () => {
-    const result = await runner.run(nodeCheck("bad", "process.exit(3)"), { workingDir: tmp });
+    const result = await runner.run(nodeCheck("bad", "process.exit(3)"), trusted());
     expect(result.status).toBe("failed");
     expect(result.exitCode).toBe(3);
   });
@@ -284,7 +304,7 @@ describe("execution outcomes are distinguished, not collapsed", () => {
     const missing = VerificationCheck.parse({
       id: "gone", name: "gone", executable: path.join(tmp, "does-not-exist.exe"),
     });
-    const result = await runner.run(missing, { workingDir: tmp });
+    const result = await runner.run(missing, trusted());
     // Blocked before launch, because the executable is checked immediately
     // before spawning. Either way it must NOT read as a code failure.
     expect(["error", "blocked"]).toContain(result.status);
@@ -294,7 +314,7 @@ describe("execution outcomes are distinguished, not collapsed", () => {
   it("a hang is timed_out, not failed", async () => {
     const result = await runner.run(
       nodeCheck("hang", "setInterval(() => {}, 1000)", { timeoutMs: 1500 }),
-      { workingDir: tmp },
+      trusted(),
     );
     expect(result.status).toBe("timed_out");
     expect(result.timedOut).toBe(true);
@@ -305,7 +325,7 @@ describe("execution outcomes are distinguished, not collapsed", () => {
     const controller = new AbortController();
     const promise = runner.run(
       nodeCheck("slow", "setInterval(() => {}, 1000)", { timeoutMs: 30_000 }),
-      { workingDir: tmp, signal: controller.signal },
+      trusted({ signal: controller.signal }),
     );
     setTimeout(() => controller.abort(), 300);
     const result = await promise;
@@ -314,28 +334,38 @@ describe("execution outcomes are distinguished, not collapsed", () => {
     expect(result.status).not.toBe("passed");
   });
 
+  it("refuses to launch an executable with NO trusted identity", async () => {
+    /**
+     * Fail closed. Without a captured identity the runner cannot confirm that
+     * this is the program approved before the implementation ran, so it does
+     * not run it - it does not fall back to "the file exists, good enough",
+     * which was precisely the gap this correction closed.
+     */
+    const result = await runner.run(nodeCheck("orphan", "process.exit(0)"), {
+      workingDir: tmp,
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.blockedReason).toBe("executable_identity_unavailable");
+  });
+
   it("refuses to start when the run was already cancelled", async () => {
     const controller = new AbortController();
     controller.abort();
-    const result = await runner.run(nodeCheck("never", "process.exit(0)"), {
-      workingDir: tmp, signal: controller.signal,
-    });
+    const result = await runner.run(nodeCheck("never", "process.exit(0)"), trusted({ signal: controller.signal }));
     expect(result.status).toBe("blocked");
     expect(result.blockedReason).toBe("cancelled_before_start");
   });
 
   it("reports a disabled check as blocked, never as passing", async () => {
     const result = await runner.run(
-      nodeCheck("off", "process.exit(0)", { enabled: false }), { workingDir: tmp },
+      nodeCheck("off", "process.exit(0)", { enabled: false }), trusted(),
     );
     expect(result.status).toBe("blocked");
     expect(result.blockedReason).toBe("check_disabled");
   });
 
   it("blocks when the phase budget is already spent", async () => {
-    const result = await runner.run(nodeCheck("late", "process.exit(0)"), {
-      workingDir: tmp, remainingBudgetMs: 0,
-    });
+    const result = await runner.run(nodeCheck("late", "process.exit(0)"), trusted({ remainingBudgetMs: 0 }));
     expect(result.status).toBe("blocked");
     expect(result.blockedReason).toBe("run_budget_exhausted");
   });
@@ -349,7 +379,7 @@ describe("output is bounded", () => {
       "for (let i = 0; i < 20000; i++) process.stdout.write('0123456789'.repeat(10));",
       { timeoutMs: 60_000 },
     );
-    const result = await runner.run(noisy, { workingDir: tmp });
+    const result = await runner.run(noisy, trusted());
 
     expect(result.stdoutBytes).toBeGreaterThan(CHECK_CEILINGS.maxOutputBytesPerStream);
     expect(result.outputTruncated).toBe(true);
@@ -364,7 +394,7 @@ describe("output is bounded", () => {
         "for (let i = 0; i < 20000; i++) process.stderr.write('e'.repeat(100)); process.exit(1);",
         { timeoutMs: 60_000 },
       ),
-      { workingDir: tmp },
+      trusted(),
     );
     expect(result.stderrBytes).toBeGreaterThan(CHECK_CEILINGS.maxOutputBytesPerStream);
     expect(result.outputTruncated).toBe(true);
@@ -381,7 +411,7 @@ describe("output is bounded", () => {
         "process.stdout.write(String.fromCharCode(27) + '[2K' + 'VERDICT' "
         + "+ String.fromCharCode(7) + String.fromCharCode(0) + 'X')",
       ),
-      { workingDir: tmp },
+      trusted(),
     );
     expect(result.status).toBe("passed");
     // The visible text survives...

@@ -105,6 +105,42 @@ asserts the injected program never executes.
 The fingerprint is order-independent, so reformatting or reordering a config file
 is not treated as tampering.
 
+### The executable is a second trust object
+
+The policy fingerprint protects the check **definition**. It says nothing about
+the bytes at the path that definition names, and that left a real gap:
+
+```
+trusted policy names tools/check.js      fingerprint F
+agent receives write authority
+agent replaces tools/check.js            fingerprint STILL F
+orchestrator confirms the file exists
+orchestrator runs the replacement, as trusted verification
+```
+
+`fs.statSync` establishes only that *something* is at the path. So every
+runnable check now also carries a `VerificationExecutableIdentity` — the
+resolved path, a streamed **SHA-256** of the contents, and the size — captured
+at the same trusted moment as the definitions, **before** planning, approval or
+implementation. Hashing after the agent had finished would hash exactly the file
+that cannot be trusted.
+
+Immediately before `spawn` — after every other precondition, so the window is as
+small as this process can make it — the identity is recomputed and compared. Any
+difference blocks, and the check is **not launched**.
+
+The identity is deliberately **not** part of the policy fingerprint. A changed
+policy and a changed executable are different failures with different causes;
+`executable_integrity_changed` is its own block reason so a replaced binary is
+never reported as "the definitions changed".
+
+It **fails closed** in every direction: no captured identity, an unreadable
+file, a different digest, or a path that now resolves to a different file all
+refuse. A check whose identity cannot be established is blocked, never run.
+
+The identity is an orchestrator observation, never configuration — the schema is
+`.strict()`, so a project file supplying one is rejected rather than believed.
+
 ---
 
 ## 4. How execution is bounded
@@ -117,6 +153,7 @@ is not treated as tampering.
 | **Timeout** | Per-check, clamped to a hard ceiling, further clamped by the remaining phase budget. |
 | **Cancellation** | `AbortSignal`, wired to the run's existing cancellation. |
 | **Output** | Bounded per stream; bytes counted, tail retained, truncation flagged. |
+| **Executable identity** | SHA-256 captured before implementation, revalidated immediately before launch. Mismatch blocks. |
 | **Ceilings** | `CHECK_CEILINGS` — not configurable; editing that file is the only way past. |
 
 Shell metacharacters reach the program as literal argv. A test passes
@@ -143,7 +180,9 @@ far worse — let "we never ran it" read as "it was fine".
 - `error` is a process that could not start. `timed_out` is a deadline.
   `cancelled` is the run stopping. None of them says anything about the code.
 - `blocked` is a refusal before launch — not authorised, invalid definition, over
-  a ceiling, working-directory escape.
+  a ceiling, working-directory escape, or **the executable is not the program
+  that was trusted** (`executable_integrity_changed` /
+  `executable_identity_unavailable`).
 - `not_run` is never a pass.
 
 `summariseChecks` returns `allPassed: false` for an empty run. That guard is
@@ -192,6 +231,24 @@ Tested, each against a check that really does it:
 | commits a credential | `sensitive_change` **and** `git_mutation` |
 | behaves | clean `verified`, review `pass` |
 
+And, for executable integrity — each proving **non-execution** with a marker file
+the malicious program writes as its first action, not merely a status field:
+
+| A check whose executable was… | Result |
+| --- | --- |
+| replaced after capture | blocked; marker absent |
+| modified in place | blocked; marker absent |
+| repointed via a link (where the platform allows) | blocked; marker absent |
+| left alone | runs normally, passes |
+| tampered with while the policy stayed identical | blocked **by the digest**, fingerprint provably unchanged |
+| never fingerprinted | blocked, fail-closed |
+
+One test runs a malicious payload directly and asserts the marker **does**
+appear, so a later "pass" cannot come from a payload that was simply incapable
+of running. Mutation-tested: with the integrity comparison bypassed, the
+replacement test fails on the marker assertion — the malicious executable really
+does run — and with it restored, it does not.
+
 Checks are **skipped entirely when the repository cannot be inspected.** Running
 code we would then be unable to observe is strictly worse than not running it —
 we would have executed something and have no idea what it did.
@@ -222,29 +279,37 @@ These are real. None of them is solved by this phase.
 1. **Not a sandbox.** A check can do anything the orchestrator user can do. What
    is controlled is *what gets launched*; what is provided afterwards is
    *detection*. Containment is not claimed.
+3. **Executable integrity is detection across an interval, not an atomic
+   guarantee.** The identity is captured before implementation and revalidated
+   immediately before execution, which detects replacement or modification
+   across the implementation interval. It is **not** an OS-level atomic
+   open-and-execute guarantee: an attacker able to modify the file in the window
+   between the final hash and the process launch, or to change what the path
+   resolves to at exec time, is outside what this can prevent. Closing that
+   would need OS-level controls this phase does not implement.
 2. **Network is not actually blocked.** The environment is non-interactive and no
    credentials are passed, but a check that opens a socket will succeed. Real
    denial needs OS-level controls this phase does not implement. Setting an
    environment variable is not network isolation, and claiming otherwise would be
    worse than the gap.
-3. **Descendant processes may survive.** Carried over from 4B.1: killing the
+4. **Descendant processes may survive.** Carried over from 4B.1: killing the
    launched process on timeout or cancellation does not guarantee its children
    die. Cross-platform process-tree termination is not implemented. A check that
    spawns a long-running child can leave that child running.
-4. **No CPU or memory isolation.** A check can consume as much of either as the
+5. **No CPU or memory isolation.** A check can consume as much of either as the
    machine allows. Only wall-clock time is bounded.
-5. **Restart semantics are coarse.** The workflow refuses to replay a spent
+6. **Restart semantics are coarse.** The workflow refuses to replay a spent
    decision, so a completed check phase cannot be re-entered by replay — a test
    asserts the counter stays at one. But a crash *during* the check phase leaves
    the node incomplete, and resuming re-runs the whole phase, re-executing checks
    that had already run. Making individual check results durable mid-phase would
    need a redesign of the node boundary, which is out of scope here.
-6. **A malformed check in `project.json` makes the project unreadable.**
+7. **A malformed check in `project.json` makes the project unreadable.**
    `getProject` re-parses the whole record, so a hand-edited invalid definition
    throws rather than being reported as one blocked check. This fails *closed* —
    nothing executes — but it is a crash rather than a clean report.
-7. **The policy guard is capture-and-compare, not a lock.** It detects that the
+8. **The policy guard is capture-and-compare, not a lock.** It detects that the
    definitions changed; it does not prevent the write. That is sufficient here
    because detection blocks execution, but it is detection.
-8. **Output excerpts are bounded and lossy** by design. A failure whose cause is
+9. **Output excerpts are bounded and lossy** by design. A failure whose cause is
    in the middle of a very long log may not appear in the retained tail.

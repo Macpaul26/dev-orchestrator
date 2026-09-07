@@ -4,12 +4,13 @@ import {
   VerificationCheckResult, CHECK_CEILINGS,
   type VerificationCheck as TVerificationCheck,
   type VerificationCheckResult as TVerificationCheckResult,
+  type VerificationExecutableIdentity as TIdentity,
   type CheckBlockReason,
 } from "../domain/verificationCheck.js";
 import { BASE_ENV_PASSTHROUGH } from "../adapters/claude-code/config.js";
 import { FsBoundary } from "../security/fsBoundary.js";
 import { PathEscapeError } from "../persistence/paths.js";
-import { executableUsable } from "./checkPolicy.js";
+import { verifyExecutableIdentity } from "./checkPolicy.js";
 
 /**
  * THE CONTROLLED CHECK RUNNER
@@ -35,6 +36,14 @@ import { executableUsable } from "./checkPolicy.js";
 export interface CheckRunOptions {
   /** Absolute project working directory. The containment root. */
   workingDir: string;
+  /**
+   * What this executable WAS before the untrusted implementation ran.
+   *
+   * Required in practice: when it is absent the check is blocked rather than
+   * run, because an executable with no trusted identity cannot be confirmed as
+   * the program that was approved.
+   */
+  expectedIdentity?: TIdentity;
   /** Aborts the check. Wired to the run's existing cancellation. */
   signal?: AbortSignal;
   /** Remaining wall-clock budget for the whole check phase. */
@@ -131,10 +140,13 @@ function blocked(
   check: TVerificationCheck,
   reason: CheckBlockReason,
   detail: string,
+  digests: { expected?: string | null; observed?: string | null } = {},
 ): TVerificationCheckResult {
   return VerificationCheckResult.parse({
     checkId: check.id, name: check.name, status: "blocked",
     blockedReason: reason, detail,
+    expectedSha256: digests.expected ?? null,
+    observedSha256: digests.observed ?? null,
   });
 }
 
@@ -184,11 +196,32 @@ export class ControlledCheckRunner {
       return blocked(check, "cancelled_before_start", "the run was cancelled before this check started");
     }
 
-    const usable = executableUsable(check.executable);
-    if (!usable.ok) return blocked(check, usable.reason, usable.detail);
-
     const cwd = resolveCheckCwd(options.workingDir, check.cwd);
     if (!cwd.ok) return blocked(check, "working_directory_escape", cwd.detail);
+
+    /**
+     * EXECUTABLE INTEGRITY - THE LAST THING BEFORE `spawn`.
+     *
+     * Deliberately placed here, after every other precondition and immediately
+     * before launch, so the window between "we confirmed which program this is"
+     * and "the operating system starts it" is as small as this process can make
+     * it.
+     *
+     * It replaces a bare existence check, which established only that SOMETHING
+     * was at the path. The policy fingerprint cannot cover this: an agent that
+     * rewrites the file while leaving the definition alone changes no
+     * definition at all, so the fingerprint stays identical and only the
+     * content digest moves.
+     *
+     * See docs/PHASE-005.md - this detects replacement across the
+     * implementation interval. It is NOT an atomic open-and-execute guarantee.
+     */
+    const integrity = verifyExecutableIdentity(check.executable, options.expectedIdentity);
+    if (!integrity.ok) {
+      return blocked(check, integrity.reason, integrity.detail, {
+        expected: integrity.expected, observed: integrity.observed,
+      });
+    }
 
     // The effective deadline is the SMALLER of the check's own timeout and what
     // is left of the whole phase's budget, so a long check cannot consume a

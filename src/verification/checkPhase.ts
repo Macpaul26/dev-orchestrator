@@ -63,6 +63,7 @@ function notAttempted(
     results: policy.rejected.map((r) => ({
       checkId: r.id, name: r.id, status: "blocked" as const,
       blockedReason: r.reason, detail: r.detail,
+      expectedSha256: null, observedSha256: null,
     })),
     ...extra,
   });
@@ -128,6 +129,9 @@ export class VerificationCheckPhase {
         signal: options.signal,
         remainingBudgetMs: remaining,
         now: options.now,
+        // The identity captured BEFORE implementation. Absent means the runner
+        // blocks rather than runs - it will not launch what it cannot identify.
+        expectedIdentity: options.policy.identities[check.id],
       }));
     }
 
@@ -139,6 +143,7 @@ export class VerificationCheckPhase {
         exitCode: null, signal: null, durationMs: 0, timedOut: false,
         cancelled: false, stdoutBytes: 0, stderrBytes: 0,
         outputTruncated: false, outputExcerpt: "",
+        expectedSha256: null, observedSha256: null,
         startedAt: null, endedAt: null,
       });
     }
