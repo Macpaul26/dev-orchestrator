@@ -12,6 +12,12 @@ import { RepositoryVerifier } from "../../verification/verifier.js";
 import { buildVerificationOutcome } from "../../verification/outcome.js";
 import { capturePolicy } from "../../verification/checkPolicy.js";
 import { planFromProposal } from "../../reasoning/proposal.js";
+import { assembleContext, detectAuthorityConflicts } from "../../reasoning/context.js";
+import {
+  projectMetadata, humanDecisions, humanConstraints,
+  repositoryObservations, taskDescription, historicalAgentClaims,
+} from "../../reasoning/contextSources.js";
+import { summariseContext } from "../../domain/reasoningContext.js";
 import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
 import { AgentReport } from "../../domain/implementation.js";
 import { issueGrant, grantIdFor } from "../../domain/grant.js";
@@ -206,18 +212,71 @@ export const plan = (ctx: NodeContext) =>
     }
 
     const project = ctx.store.getProject(state.projectId);
+    if (!project) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "plan", at: now() });
+      return {
+        proposedPlan: fallbackPlan(
+          "The project record could not be read, so no reasoning context could " +
+          "be assembled. This placeholder plan authorises no scope.",
+        ),
+        phase: "approve_plan",
+      } as OrchestratorUpdate;
+    }
+
+    /**
+     * ASSEMBLE THE CONTEXT (Task 007).
+     *
+     * One controlled assembly, in one place, with every record carrying its
+     * provenance. Bounds, ordering, deduplication and the refusal of
+     * credential-shaped values all happen inside `assembleContext` rather than
+     * being spread across this node and the prompt builder.
+     *
+     * NO FILE CONTENTS. The model gets project facts, human decisions and
+     * constraints, repository OBSERVATIONS, the request, and the orchestrator's
+     * own record of previous runs. It does not get source code, and Task 007
+     * deliberately does not add a way for it to ask.
+     */
+    const assembled = assembleContext([
+      ...projectMetadata(project),
+      ...humanDecisions(ctx.store.listDecisions(state.projectId)),
+      ...humanConstraints(project.constraints),
+      ...repositoryObservations(state.observations ?? []),
+      ...taskDescription(state.request),
+      ...historicalAgentClaims(ctx.store.listImplementations(state.projectId)),
+    ]);
+
+    /**
+     * CONTEXT FAILURE IS FAIL-CLOSED.
+     *
+     * A refused credential, or critical human context that will not fit, stops
+     * the reasoning call entirely. The run does NOT proceed with a quietly
+     * smaller context that looks complete - it falls back to the zero-scope
+     * plan and says why.
+     */
+    if (!assembled.ok) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "plan", at: now() });
+      return {
+        proposedPlan: fallbackPlan(
+          `Reasoning context could not be assembled (${assembled.failure.code}): ` +
+          `${assembled.failure.message}. No model call was made. This ` +
+          "placeholder plan authorises no scope.",
+        ),
+        reasoningNotes: [`context assembly failed: ${assembled.failure.code}`],
+        phase: "approve_plan",
+      } as OrchestratorUpdate;
+    }
+
+    /**
+     * Conflicts are REPORTED, never resolved here and never resolved by the
+     * model. Both records stay in the context with their labels; the human sees
+     * that a low-authority claim touches something they decided.
+     */
+    const conflicts = detectAuthorityConflicts(assembled.context);
+
     const result = await model.generate({
       runId: state.runId,
       operation: "propose_plan",
-      context: {
-        // ALL UNTRUSTED. Bounded observations the orchestrator made itself plus
-        // human-written constraints - no file contents, no environment, no
-        // grants, no credentials. See reasoning/prompt.ts.
-        request: state.request,
-        projectName: project?.name ?? state.projectId,
-        observations: state.observations ?? [],
-        constraints: project?.constraints ?? [],
-      },
+      context: { assembled: assembled.context },
     });
 
     ctx.emit({
@@ -245,6 +304,7 @@ export const plan = (ctx: NodeContext) =>
         reasoning: result.record,
         reasoningFailure: result.failure,
         reasoningNotes: [`reasoning unavailable: ${result.failure.code}`],
+        contextSummary: summariseContext(assembled.context),
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -266,7 +326,16 @@ export const plan = (ctx: NodeContext) =>
       proposedPlan: translated.plan,
       reasoning: result.record,
       reasoningFailure: null,
-      reasoningNotes: translated.notes,
+      reasoningNotes: [
+        ...translated.notes,
+        ...assembled.context.warnings.map((w) => `context: ${w}`),
+        ...conflicts.map((c) =>
+          `AUTHORITY CONFLICT: a ${c.lower.provenance} record overlaps a ` +
+          `${c.higher.provenance} (shared terms: ${c.sharedTerms.join(", ")}). ` +
+          "The human record takes precedence; the model was not asked to choose.",
+        ),
+      ],
+      contextSummary: summariseContext(assembled.context),
       phase: "approve_plan",
     } as OrchestratorUpdate;
   };

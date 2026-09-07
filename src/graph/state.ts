@@ -9,6 +9,7 @@ import type { VerificationOutcome } from "../domain/verification.js";
 import type { VerificationCheckRun } from "../domain/verificationCheck.js";
 import type { CheckPolicy } from "../verification/checkPolicy.js";
 import type { ReasoningRecord, ReasoningFailure } from "../domain/reasoning.js";
+import type { ContextSummary } from "../domain/reasoningContext.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
 
 /**
@@ -131,6 +132,17 @@ export const OrchestratorState = Annotation.Root({
   }),
   /** Why reasoning did not produce a plan. Fail-closed evidence, not a plan. */
   reasoningFailure: Annotation<ReasoningFailure | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /**
+   * A BOUNDED SUMMARY of the assembled reasoning context.
+   *
+   * Counts and warnings, never the context itself. The records are derived from
+   * things the store already holds, so copying them into a checkpoint would
+   * duplicate project text into a second place with a different lifetime - and
+   * would make the checkpoint grow with the project.
+   */
+  contextSummary: Annotation<ContextSummary | null>({
     reducer: (_p, n) => n, default: () => null,
   }),
   /** Model-proposed paths trusted code refused, and why. Shown to the human. */

@@ -1,6 +1,7 @@
 import type {
   ReasoningProposal, ReasoningFailure, ReasoningRecord,
 } from "../domain/reasoning.js";
+import type { AssembledContext } from "../domain/reasoningContext.js";
 
 /**
  * THE REASONING MODEL SEAM
@@ -23,20 +24,18 @@ import type {
  */
 
 export interface ReasoningContext {
-  /** UNTRUSTED. What the human typed. */
-  request: string;
-  /** UNTRUSTED. Project name and description, for orientation. */
-  projectName: string;
   /**
-   * UNTRUSTED. Repository facts the orchestrator observed itself.
+   * The assembled, bounded, provenance-labelled context (Task 007).
    *
-   * Observations, not file contents: branch, head, whether the tree is clean,
-   * a bounded list of changed paths. Enough to reason about, small enough not
-   * to become a channel for bulk project text.
+   * Replaces the four loose fields this interface used to carry. That shape
+   * flattened a human decision and a repository observation into
+   * indistinguishable prose, and it had no bounds of its own - both of which
+   * are now the assembler's job. See reasoning/context.ts.
+   *
+   * Still UNTRUSTED as INPUT: the labels tell the model and the human where
+   * each fact came from; they do not make the model believe them.
    */
-  observations: readonly string[];
-  /** UNTRUSTED. Durable project constraints a human wrote. */
-  constraints: readonly string[];
+  assembled: AssembledContext;
 }
 
 export interface ReasoningRequest {

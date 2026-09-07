@@ -33,6 +33,20 @@ grant-bound operations (`read_file`, `list_directory`, `write_file`,
 filesystem API, and the request protocol has no field for a grant, project,
 session, scope or budget, so authority is not something it can name.
 
+**Task 007 is implemented: the controlled reasoning context.**
+
+The context a reasoning model receives is now assembled in one place, with every
+record carrying its PROVENANCE - human decision, human constraint, trusted
+project fact, repository observation, task description, or untrusted agent claim
+- and an authority rank the orchestrator compares itself rather than asking the
+model to. Bounded, deterministically ordered, deduplicated within provenance but
+never across it.
+
+A human decision or constraint is never silently dropped: if it will not fit,
+assembly FAILS. Non-critical material may be dropped and the drop is stated in
+the prompt. A credential-shaped value is refused rather than redacted, and no
+file contents are sent at all. See [docs/PHASE-007.md](docs/PHASE-007.md).
+
 **Task 006 is implemented: the controlled reasoning boundary.**
 
 The orchestrator can now use a language model to propose a plan - objectives,
@@ -111,6 +125,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
+| [docs/PHASE-007.md](docs/PHASE-007.md) | The controlled reasoning context: provenance, authority precedence, bounds and fail-closed truncation, deterministic ordering, deduplication, and sensitive-data refusal |
 | [docs/PHASE-006.md](docs/PHASE-006.md) | The reasoning boundary: why model output is never authority, the strict schema and trusted rebuild, the prompt-injection posture, credential handling, and fail-closed behaviour |
 | [docs/PHASE-005.md](docs/PHASE-005.md) | Controlled verification execution: predefined checks, the trusted policy fingerprint, process bounding, the seven outcomes, post-check inspection, and what is detected rather than prevented |
 | [docs/PHASE-4B3.md](docs/PHASE-4B3.md) | The complete controlled implementation loop: the four-compartment evidence model, git-mutation and sensitive-change detection, and the human review gate |
