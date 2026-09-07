@@ -20,6 +20,7 @@ import {
   type ImplementationStatus,
 } from "../domain/implementation.js";
 import type { ActivityErrorCategory } from "../domain/activity.js";
+import type { AgentProcessResult as TAgentProcessResult } from "../domain/agentProcess.js";
 import type { ProjectStore } from "../projects/projectStore.js";
 import { orchestratorHome } from "../persistence/paths.js";
 
@@ -89,13 +90,42 @@ export interface ImplementationAgent {
     request: ImplementationRequest,
     cancellation: CancellationToken,
   ): Promise<TAgentReport>;
+
+  /**
+   * TRUSTED facts about how the agent ran, if there are any.
+   *
+   * Deliberately a SEPARATE method from `implement`, which returns the agent's
+   * own narrative. What the operating system reported - a pid, an exit code, a
+   * signal - is evidence; what the agent returned is not. Keeping them on
+   * different methods means they cannot be conflated by accident, and an agent
+   * has no way to author what appears here.
+   *
+   * Optional: an in-process agent has no process to report on.
+   */
+  observations?(): TAgentProcessResult | null;
 }
 
-export interface ImplementationRequest {
+/**
+ * WHAT the agent is being asked to do.
+ *
+ * Kept apart from authorisation on purpose. These fields describe a task; none
+ * of them grants anything. Every field that decides what is PERMITTED - project,
+ * run, session, grant, capabilities, scope, budget, working directory - lives on
+ * the grant and the session, is set by trusted code, and cannot be influenced
+ * from here.
+ */
+export interface ImplementationTask {
   /** The human-approved intent. Text only - it is not a command. */
   instruction: string;
   /** The approved plan summary, for the agent's context. */
   planSummary?: string;
+  /** Additional background the agent may find useful. Never authority. */
+  context?: string;
+  /** Human-stated constraints. Advisory to the agent; enforced elsewhere. */
+  constraints?: readonly string[];
+}
+
+export interface ImplementationRequest extends ImplementationTask {
   /**
    * The authorised working directory.
    *
@@ -111,6 +141,8 @@ export interface ImplementationRequest {
 
 export interface ImplementationRunResult {
   run: TImplementationRun;
+  /** TRUSTED. What the OS reported, when a process was involved. */
+  processResult?: TAgentProcessResult | null;
   /** UNTRUSTED. Feeds `claimedSummary` / `claimedFiles`, nothing else. */
   agentReport: TAgentReport;
   /** True whenever the repository may hold partial work. */
@@ -361,6 +393,20 @@ export class ControlledImplementationRunner {
       }
     }
 
+    /**
+     * Trusted process facts, asked for AFTER the agent has finished.
+     *
+     * Recorded on the run so review sees what the OS said, not only what the
+     * agent said. An agent that omits this method simply contributes nothing -
+     * it cannot fabricate an exit code it did not have.
+     */
+    let processResult: TAgentProcessResult | null;
+    try {
+      processResult = agent.observations?.() ?? null;
+    } catch {
+      processResult = null;
+    }
+
     const stats = session.stats;
     if (status === "completed") {
       journal.append({
@@ -386,9 +432,12 @@ export class ControlledImplementationRunner {
       cancelRequestedAt: cancellation.isCancelled ? this.clock().toISOString() : record.cancelRequestedAt,
     });
 
+    record = store.saveImplementation({ ...record, processResult });
+
     return {
       run: record,
       agentReport,
+      processResult,
       // ALWAYS true. Even a clean completion is verified against the real
       // repository - the runner's own account is not evidence about files.
       mustVerify: true,

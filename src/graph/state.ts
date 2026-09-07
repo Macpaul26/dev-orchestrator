@@ -5,6 +5,7 @@ import type { RepositoryEvidence, InspectionFailure } from "../domain/repository
 import type { ReviewEvidence } from "../domain/evidence.js";
 import type { ImplementationGrant } from "../domain/grant.js";
 import type { ImplementationRun } from "../domain/implementation.js";
+import type { VerificationOutcome } from "../domain/verification.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
 
 /**
@@ -72,6 +73,10 @@ export const OrchestratorState = Annotation.Root({
   grant: Annotation<ImplementationGrant | null>({
     reducer: (_p, n) => n, default: () => null,
   }),
+  /** UNTRUSTED: did the agent assert success? Recorded, never acted on. */
+  agentClaimedSuccess: Annotation<boolean>({
+    reducer: (_p, n) => n, default: () => false,
+  }),
   /** What the orchestrator observed itself doing. Not the agent's account. */
   implementationRun: Annotation<ImplementationRun | null>({
     reducer: (_p, n) => n, default: () => null,
@@ -82,6 +87,16 @@ export const OrchestratorState = Annotation.Root({
     reducer: (_p, n) => n, default: () => null,
   }),
   reviewReport: Annotation<ReviewReport | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /**
+   * The four-part verification outcome: process, claim, observation, verdict.
+   *
+   * Produced by `verify` after EVERY attempt - success, failure, crash or
+   * cancellation - because "the agent failed" is not evidence that the
+   * repository is untouched.
+   */
+  verification: Annotation<VerificationOutcome | null>({
     reducer: (_p, n) => n, default: () => null,
   }),
   /** Deterministic claimed-vs-observed evidence produced by `verify`. */

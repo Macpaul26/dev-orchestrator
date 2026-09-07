@@ -6,6 +6,7 @@ import type { ImplementationSession, CancellationToken } from "../../implementat
 import { ImplementationCancelled } from "../../implementation/session.js";
 import { AgentReport, type AgentReport as TAgentReport } from "../../domain/implementation.js";
 import type { AgentProcessOutcome } from "./processBoundary.js";
+import type { AgentProcessResult } from "../../domain/agentProcess.js";
 import { launchAgentProcess, AgentLaunchRefused } from "./processBoundary.js";
 import { ToolBridge } from "../../implementation/toolBridge.js";
 import type { ClaudeCodeConfig } from "./config.js";
@@ -47,11 +48,19 @@ import { newCorrelationId } from "../../activity/journal.js";
 export class ClaudeCodeAgent implements ImplementationAgent {
   readonly name = "claude-code";
 
+  /** Set from the OS's report once the process ends. Never agent-authored. */
+  #lastProcess: AgentProcessResult | null = null;
+
   constructor(
     private readonly config: ClaudeCodeConfig,
     /** Orchestrator-owned. The agent has no reference to it. */
     private readonly journal: ActivityJournal | null = null,
   ) {}
+
+  /** TRUSTED process facts from the most recent run. See ImplementationAgent. */
+  observations(): AgentProcessResult | null {
+    return this.#lastProcess;
+  }
 
   async implement(
     session: ImplementationSession,
@@ -151,6 +160,7 @@ export class ClaudeCodeAgent implements ImplementationAgent {
       // No request may be served after the process has ended.
       bridge.close();
     }
+    this.#lastProcess = outcome.result;
 
     if (outcome.result.status === "launch_failed") {
       this.record(session, correlationId, {

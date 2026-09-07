@@ -55,6 +55,38 @@ export function renderApproval(request: ApprovalRequest): void {
   const verification = request.payload["verification"] as Record<string, unknown> | undefined;
   if (verification) {
     line("  verification:");
+    /**
+     * THE VERDICT FIRST, AND THE DISAGREEMENT NEXT TO IT.
+     *
+     * This is the screen a human approves from, so the ordering is not
+     * cosmetic. A reader who sees "the agent says it worked" before seeing what
+     * the repository shows has already been anchored. The orchestrator verdict
+     * comes first; the agent claim appears beside it, labelled as a claim.
+     */
+    const verdict = String(verification["verdict"] ?? "unknown");
+    line(`    VERDICT: ${verdict.toUpperCase()}`);
+    if (verdict === "blocked") {
+      line("    the repository could not be inspected - NOTHING below is established");
+    }
+    line(
+      `    agent claimed success: ${String(verification["agentClaimedSuccess"] ?? false)} ` +
+      "(a claim, not evidence)",
+    );
+    const processStatus = verification["processStatus"];
+    if (processStatus !== undefined && processStatus !== null) {
+      line(
+        `    agent process: ${String(processStatus)}, exit ${String(verification["processExitCode"])} ` +
+        "(a fact about a program, not about the repository)",
+      );
+    }
+    const disagreements = (verification["disagreements"] as string[] | undefined) ?? [];
+    if (disagreements.length > 0) {
+      line(`    DISAGREEMENTS (${disagreements.length}) between the agent account and the repository:`);
+      for (const item of disagreements) line(`      - ${item}`);
+    }
+    if (verification["checksAvailable"] === false) {
+      line("    project checks: NOT EXECUTED - any claim that tests pass is unverified");
+    }
     line(`    independently verified: ${String(verification["verifiedIndependently"])}`);
     line(`    observed files ${String(verification["observedFileCount"])}, commits ${String(verification["observedCommitCount"])}`);
     const drift = (verification["scopeDrift"] as string[] | undefined) ?? [];

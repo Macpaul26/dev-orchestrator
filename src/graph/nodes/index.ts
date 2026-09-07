@@ -9,6 +9,9 @@ import {
 } from "../../domain/approval.js";
 import { ImplementationReport, ReviewReport } from "../../domain/reports.js";
 import { RepositoryVerifier } from "../../verification/verifier.js";
+import { buildVerificationOutcome } from "../../verification/outcome.js";
+import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
+import { AgentReport } from "../../domain/implementation.js";
 import { issueGrant, grantIdFor } from "../../domain/grant.js";
 import {
   ControlledImplementationRunner, NoOpImplementationAgent,
@@ -313,6 +316,7 @@ export const implement = (ctx: NodeContext) =>
 
     let claimedSummary: string;
     let claimedFiles: string[] = [];
+    let agentClaimedSuccess = false;
     let implementationRun = null;
 
     try {
@@ -329,6 +333,7 @@ export const implement = (ctx: NodeContext) =>
       // UNTRUSTED. Kept strictly on the claimed side of the report.
       claimedSummary = result.agentReport.summary;
       claimedFiles = result.agentReport.files;
+      agentClaimedSuccess = result.agentReport.claimsSuccess;
     } catch (error) {
       // A refused run is a normal outcome, not a crash. Verification still
       // happens: a denial may have arrived after some writes had landed.
@@ -352,6 +357,7 @@ export const implement = (ctx: NodeContext) =>
         createdAt: now(),
       }),
       implementationRun,
+      agentClaimedSuccess,
       phase: "verify",
     } as OrchestratorUpdate;
   };
@@ -382,9 +388,49 @@ export const verify = (ctx: NodeContext) =>
     const checkResults = await ctx.checkRunner.runAll(declaredChecks);
     const executed = checkResults.filter((r) => r.executed).length;
 
+    /**
+     * NO INSPECTOR - STILL A VERIFICATION RESULT.
+     *
+     * The temptation is to return early and leave `verification` null, because
+     * "there was nothing to verify with". That is the one thing this node must
+     * never do: an attempt with no verification record is indistinguishable, to
+     * everything downstream, from an attempt that was verified and found clean.
+     *
+     * So the absence of an inspector produces `blocked` - we could not look -
+     * rather than silence. The agent's claim is carried through unchanged, on
+     * the claimed side, where a human can see it is the only account available.
+     */
     if (!ctx.inspector) {
       ctx.emit({ type: "node_completed", runId: state.runId, node: "verify", at: now() });
-      return { phase: "review" };
+      return {
+        verification: VerificationOutcome.parse({
+          runId: state.runId,
+          verdict: "blocked",
+          process: state.implementationRun?.processResult ?? null,
+          claim: {
+            summary: state.implementation?.claimedSummary ?? "",
+            files: state.implementation?.claimedFiles ?? [],
+            claimsSuccess: state.agentClaimedSuccess,
+            usedTools: ((state.implementationRun?.writes ?? 0)
+              + (state.implementationRun?.deletes ?? 0)) > 0,
+          },
+          observation: { inspected: false },
+          checks: {
+            declared: declaredChecks.length,
+            executed,
+            available: false,
+            unavailableReason: "no repository inspector is configured",
+          },
+          independentlyVerified: false,
+          notes: [
+            "no repository inspector was available, so nothing about this attempt " +
+            "was established independently - including whether anything changed",
+          ],
+          createdAt: now(),
+        }),
+        checkResults,
+        phase: "review",
+      } as OrchestratorUpdate;
     }
 
     const verifier = new RepositoryVerifier(ctx.inspector);
@@ -414,10 +460,34 @@ export const verify = (ctx: NodeContext) =>
       at: now(),
     });
 
+    /**
+     * THE FOUR-PART OUTCOME.
+     *
+     * Built here rather than inside the verifier so the PROCESS facts - which
+     * come from the OS, not from the repository - are joined to the repository
+     * observation at one deliberate point, without either being able to
+     * influence the other's contents.
+     */
+    const outcome = buildVerificationOutcome({
+      runId: state.runId,
+      evidence: result.evidence,
+      report: AgentReport.parse({
+        summary: state.implementation?.claimedSummary ?? "",
+        files: state.implementation?.claimedFiles ?? [],
+        // A claim of success only exists if the agent actually made one.
+        claimsSuccess: state.agentClaimedSuccess,
+      }),
+      process: state.implementationRun?.processResult ?? null,
+      toolRequestsHandled: (state.implementationRun?.writes ?? 0)
+        + (state.implementationRun?.deletes ?? 0),
+      checksDeclared: declaredChecks.length,
+    });
+
     ctx.emit({ type: "node_completed", runId: state.runId, node: "verify", at: now() });
     return {
       implementation: result.report,
       reviewEvidence: result.evidence,
+      verification: outcome,
       checkResults,
       phase: "review",
     } as OrchestratorUpdate;
@@ -535,9 +605,50 @@ export const review = (ctx: NodeContext) =>
       });
     }
 
+    /**
+     * THE VERDICT COMES FROM VERIFICATION, NOT FROM THE AGENT.
+     *
+     * Anything the verification outcome flags as blocking stops this being a
+     * clean pass, whatever the agent said and whatever its process returned.
+     */
+    const outcome = state.verification;
+    for (const disagreement of outcome?.disagreements ?? []) {
+      findings.push({ severity: "warning", message: `Disagreement: ${disagreement}` });
+    }
+    if (outcome && outcome.claim.claimsSuccess && isBlocking(outcome.verdict)) {
+      findings.push({
+        severity: "blocker",
+        message:
+          `The agent reported success, but independent verification returned ` +
+          `"${outcome.verdict}". The verification stands.`,
+      });
+    }
+    if (outcome?.checks.declared && !outcome.checks.available) {
+      findings.push({
+        severity: "info",
+        message:
+          `${outcome.checks.declared} project check(s) declared and none executed - ` +
+          "any claim about tests passing is the agent's alone.",
+      });
+    }
+
     const drift = evidence?.scope.drift ?? [];
+    /**
+     * A DISAGREEMENT IS ENOUGH TO WITHHOLD "pass".
+     *
+     * `pass` here means something narrow: the two accounts of what happened
+     * agree, and everything observed was inside what a human authorised. An
+     * agent that reported success while the repository shows nothing, or that
+     * listed a file it never touched, has not met that bar - even though the
+     * repository itself may be perfectly fine.
+     *
+     * This withholds a RECOMMENDATION; it decides nothing. `changes_requested`
+     * and `pass` both arrive at the same human gate, and neither can approve.
+     */
     const verdict =
-      drift.length > 0 ? "changes_requested"
+      outcome && isBlocking(outcome.verdict) ? "changes_requested"
+      : (outcome?.disagreements.length ?? 0) > 0 ? "changes_requested"
+      : drift.length > 0 ? "changes_requested"
       : !evidence || !evidence.inspectionSucceeded ? "changes_requested"
       : "pass";
 
@@ -579,6 +690,15 @@ export const approveReview = (ctx: NodeContext) =>
         repository: repositorySummary(state),
         // The independent-verification headline, so approval is an informed act.
         verification: {
+          // The four-part outcome, so the human sees process, claim,
+          // observation and verdict side by side rather than one boolean.
+          verdict: state.verification?.verdict ?? "blocked",
+          independentlyVerified: state.verification?.independentlyVerified ?? false,
+          agentClaimedSuccess: state.verification?.claim.claimsSuccess ?? false,
+          disagreements: state.verification?.disagreements ?? [],
+          processExitCode: state.verification?.process?.exitCode ?? null,
+          processStatus: state.verification?.process?.status ?? null,
+          checksAvailable: state.verification?.checks.available ?? false,
           verifiedIndependently: state.implementation?.verifiedIndependently ?? false,
           observedFileCount: state.implementation?.observedFiles.length ?? 0,
           observedCommitCount: state.implementation?.observedCommits.length ?? 0,

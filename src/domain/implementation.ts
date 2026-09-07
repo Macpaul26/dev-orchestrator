@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Capability } from "./capability.js";
 import { ActivityErrorCategory } from "./activity.js";
+import { AgentProcessResult } from "./agentProcess.js";
 
 /**
  * THE IMPLEMENTATION RUN RECORD
@@ -84,6 +85,15 @@ export const ImplementationRun = z.object({
 
   cancelRequestedBy: z.string().nullable().default(null),
   cancelRequestedAt: z.string().datetime().nullable().default(null),
+
+  /**
+   * What the OPERATING SYSTEM reported about the agent's process.
+   *
+   * Trusted evidence, and evidence about the PROCESS only - `exitCode: 0` means
+   * a program returned zero, never that a repository is in the intended state.
+   * Null when no process was involved.
+   */
+  processResult: AgentProcessResult.nullable().default(null),
 
   failureCategory: ActivityErrorCategory.nullable().default(null),
   /** Short and non-disclosing. Never a buffer, never file content. */

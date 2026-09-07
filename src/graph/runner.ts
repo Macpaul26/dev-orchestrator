@@ -19,6 +19,9 @@ import { createCheckpointer, closeCheckpointer } from "../persistence/checkpoint
 import { createInspectorForProject } from "../adapters/repository/index.js";
 import { DisabledCheckRunner } from "../verification/checks.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
+import { ClaudeCodeAgent } from "../adapters/claude-code/agent.js";
+import { configFromEnvironment } from "../adapters/claude-code/config.js";
+import { ActivityJournal } from "../activity/journal.js";
 
 export interface RunResult {
   run: TWorkflowRun;
@@ -63,6 +66,32 @@ export class WorkflowRunner {
   }
 
   /**
+   * Build the Claude Code agent, IF an operator configured one.
+   *
+   * Returns null when unconfigured, which is the default and means the implement
+   * node writes nothing. Configuration alone is not authority: a configured
+   * agent still cannot touch a repository without a human-approved grant, a
+   * scope, a capability and a session - it merely becomes the thing that would
+   * run if all of those existed.
+   *
+   * A misconfiguration yields null rather than throwing, because a bad agent
+   * setting must not take down a workflow that may never reach the implement
+   * node at all. `dev-agent tools` reports the misconfiguration explicitly.
+   */
+  private configuredAgent(run: TWorkflowRun): ImplementationAgent | null {
+    try {
+      const config = configFromEnvironment();
+      if (!config) return null;
+      return new ClaudeCodeAgent(
+        config,
+        new ActivityJournal(this.store.activityFile(run.projectId, run.id)),
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Release the SQLite handle. Windows keeps the database file locked while a
    * handle is open, so a caller that wants to delete or move the checkpoint
    * directory must close first.
@@ -89,7 +118,9 @@ export class WorkflowRunner {
       checkRunner: new DisabledCheckRunner(),
       // Null in production - Phase 4A connects no coding agent. Tests inject a
       // deterministic fake to exercise the capability boundary.
-      agent: this.agent,
+      // An explicitly injected agent wins; otherwise use one the operator
+      // configured. Null when neither exists, which is the default.
+      agent: this.agent ?? this.configuredAgent(run),
       emit: (event: OrchestratorEvent) => { log.append(event); },
       onApprovalRequested: (request) => {
         captured.approval = ApprovalRequest.parse(request);

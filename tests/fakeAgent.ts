@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import type {
   ImplementationAgent, ImplementationRequest,
 } from "../src/implementation/runner.js";
@@ -32,6 +34,17 @@ export type FakeStep =
   | { kind: "cancel"; reason?: string }
   /** Throw, to exercise the failure path. */
   | { kind: "throw"; message?: string }
+  /**
+   * Write DIRECTLY to disk, going around the session entirely.
+   *
+   * Not a contrived attack - it is what a real agent is. Phase 4B.1 is explicit
+   * that the child process is not OS-sandboxed: Claude Code has its own file
+   * tools and can touch the working tree without ever asking the bridge. So the
+   * write boundary is not the last line of defence, and this step exists to
+   * prove what the line behind it does. Nothing stops the write; independent
+   * inspection is what notices it afterwards.
+   */
+  | { kind: "sideEffect"; path: string; contents: string }
   /** Try to reach something it must not have. Asserted to fail. */
   | { kind: "escalate"; target: EscalationTarget };
 
@@ -50,6 +63,8 @@ export type EscalationTarget =
 
 export interface FakeAgentOptions {
   steps: FakeStep[];
+  /** Absolute repository path, needed only by `sideEffect`. Tests supply it. */
+  repoRoot?: string;
   /** What the agent will CLAIM it changed. Defaults to what it actually wrote. */
   claimFiles?: string[];
   claimSummary?: string;
@@ -97,6 +112,13 @@ export class FakeImplementationAgent implements ImplementationAgent {
           break;
         case "throw":
           throw new Error(step.message ?? "the agent failed deliberately");
+        case "sideEffect": {
+          // Deliberately not `session.writeFile`. The point is the bypass.
+          const target = path.join(this.options.repoRoot!, step.path);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, step.contents);
+          break;
+        }
         case "escalate":
           this.attemptEscalation(session, step.target);
           break;
