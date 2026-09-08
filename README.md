@@ -47,6 +47,12 @@ store refuse the write instead of trusting a partial count. A listing reports
 either an exact count or an explicit lower bound - never a truncated number
 presented as a total.
 
+Lock ownership lives in the lock's directory NAME, so releasing one can only ever
+name your own and an older owner cannot delete a newer owner's lock. Nothing
+about a lock's age decides whether it may be taken: a lock is reclaimed when the
+kernel confirms its owner is gone, so a process that is merely slow keeps what it
+holds, and a process that has died is recovered from immediately.
+
 Nothing writes or reads experience in the workflow yet - the store is
 deliberately unwired, and a test asserts no production module imports it. There
 is no cross-project access, no retrieval, no confidence evaluation, and no path
@@ -179,7 +185,7 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
-| [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock and its crash-recovery limits, bounded directory accounting, corruption handling, and why the store is deliberately unwired |
+| [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why the store is deliberately unwired |
 | [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md) | The learning foundation: ARCHITECTURE ONLY - why a lesson can inform a proposal but never authorise one, how a claim differs from a verified outcome, the three memory layers, and the roadmap to Tasks 009-014 |
 | [docs/PHASE-008.md](docs/PHASE-008.md) | Controlled repository evidence: the closed operation set, the trusted caller boundary, path and sensitive-file security, excerpt bounds, and why the model has no evidence interface |
 | [docs/PHASE-007.md](docs/PHASE-007.md) | The controlled reasoning context: provenance, authority precedence, bounds and fail-closed truncation, deterministic ordering, deduplication, and sensitive-data refusal |

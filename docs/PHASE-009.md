@@ -123,9 +123,14 @@ because the digest is a signature.
 maxRecordBytes 32 KB        maxRecordsPerProject 5,000
 maxListResults 50           maxListBytes 256 KB
 maxDirectoryEntries 20,000  maxTemporaryCleanupsPerWrite 64
-lockStaleMs 30,000          lockAcquireTimeoutMs 5,000
-lockPollMaxMs 50
+lockAbandonMs 60,000        gateAbandonMs 10,000
+temporaryAbandonMs 30,000   lockAcquireTimeoutMs 5,000
+lockPollMaxMs 50            maxLockEntries 64
+maxLockOwnerBytes 1,024
 ```
+
+There is deliberately **no** `lockStaleMs`. Nothing about a lock's age decides
+whether it may be taken from its owner — see §6b.
 
 A caller may request *fewer* results than `maxListResults`, never more. An
 overwrite never needs a slot — re-persisting an existing experience is not
@@ -145,12 +150,16 @@ already holds. §6a covers how the ceiling is enforced.
 
 ### Is quota enforcement process-safe?
 
-**Yes.** It is enforced by a lock file in the project directory, created with
-`open(..., "wx")` — exclusive create, atomic on both POSIX and Windows. An
-in-memory JavaScript mutex was explicitly *not* used: this store is written from
-separate OS processes (the durability test proves it), so a mutex would have
-protected nothing that needed protecting while making the single-process test go
-green.
+**Yes.** It is enforced by a lock in the project directory whose acquisition
+funnels through `mkdir` — atomic on both POSIX and Windows, admitting exactly one
+winner. An in-memory JavaScript mutex was explicitly *not* used: this store is
+written from separate OS processes (the durability test proves it), so a mutex
+would have protected nothing that needed protecting while making the
+single-process test go green.
+
+The ownership protocol itself is §6b. It was rebuilt after a second review
+found that the first lock could be taken from an owner that was merely slow,
+which meant it was not mutual exclusion in every supported case.
 
 ### How are concurrent writers serialized?
 
@@ -167,7 +176,7 @@ refuse if full and new       an overwrite is not growth and is never refused
     ↓
 temp → fsync → rename        publish, atomically
     ↓
-re-count if a slot was used  the only cover for a wrongly broken lock
+re-count if a slot was used  defence in depth — NOT the invariant (§6b)
     ↓
 undo if over the ceiling     a failed write leaves nothing behind
     ↓
@@ -217,34 +226,131 @@ empty.
 | Process dies… | Consequence | Recovery |
 | --- | --- | --- |
 | before acquiring the lock | nothing on disk | none needed |
-| holding the lock, before publishing | project blocked | the lock is broken once untouched for `lockStaleMs`; no slot was consumed |
-| after publishing, before releasing | record present and counted | the record *is* the accounting; the lock is broken as above |
-| during cleanup | a `.tmp` file remains | never counted as a record; removed by a later write once older than `lockStaleMs` |
+| holding the lock, before publishing | project blocked | the next writer observes the owner is gone and reclaims the lock **immediately**; no slot was consumed |
+| after publishing, before releasing | record present and counted | the record *is* the accounting; the lock is reclaimed as above |
+| during cleanup | a `.tmp` file remains | never counted as a record; removed by a later write once older than `temporaryAbandonMs` |
 
 There is no reconciliation step and no repair pass, because there is no cached
-state to repair. A stale lock costs at most `lockStaleMs` of availability and
-**never** costs capacity.
+state to repair. A dead owner costs the time until the next write attempt —
+**not** a fixed stale window — and **never** costs capacity.
 
-### Stale locks: what breaking one does and does not guarantee
+---
 
-A lock untouched for longer than `lockStaleMs` (30 s, against a critical section
-measured in milliseconds) may be broken by whoever finds it. This is a
-**heuristic**, and it is stated as one:
+## 6b. Lock ownership
 
-- It is **safe** against the case it exists for — a dead holder — because a dead
-  process cannot be inside the critical section.
-- It is **not safe** against a live holder stalled longer than the stale window:
-  a paused VM, a suspended process, a filesystem that hangs for half a minute.
+> **Corrected after independent review, twice.** The first lock had no mutual
+> exclusion at all. The second reclaimed any lock older than `lockStaleMs`,
+> which is a guess about death rather than a test for it: an owner that was
+> merely slow — a paused VM, a suspended process, a filesystem hung for half a
+> minute — could have its lock taken while it was still inside the critical
+> section. Review was right that this meant the lock was not mutual exclusion in
+> every supported case, and that the post-publish re-count could not stand in for
+> one, because it runs *after* the protected operation.
 
-That residual case is covered by a second, independent mechanism: after
-publishing a record that consumed a slot, the writer re-counts and **undoes its
-own publish** if the project is now over the ceiling. Neither mechanism is
-claimed to be airtight alone. Both are load-bearing, and that is demonstrated
-rather than asserted — see the mutation results in §14.
+### The layout
 
-Both breaking and releasing re-check ownership immediately before removing the
-lock file. There is no compare-and-unlink on a filesystem, so this **narrows**
-the window between the check and the unlink; it does not close it.
+```
+<project>/_locks/_gate                transient, held for microseconds
+<project>/_locks/<nonce>/owner.json   the lock; its NAME is its identity
+```
+
+Two rules do the work: **identity lives in the directory name**, and **age
+decides nothing**.
+
+### Why the live owner is now safe
+
+There is no longer any rule that reclaims a lock for being old. A lock is
+reclaimed when its owner is **proved gone**, and the proof comes from the kernel:
+
+```
+process.kill(pid, 0)   →  sends no signal; asks whether that process exists
+```
+
+This is the one question that can be answered correctly about a process that is
+**alive but blocked**. Any application-level scheme — a heartbeat, a renewed
+timestamp, a ping — requires the owner to *run* in order to prove it is alive,
+and a blocked owner cannot run, so every one of them concludes a stalled process
+is dead. That is precisely the failure under review, so the mechanism had to move
+out of the application and into the kernel.
+
+The mandatory test holds this to the hardest version of the case: a real child
+process takes the lock and then blocks **synchronously and permanently**, its
+lock is backdated by ten times `lockAbandonMs`, and a writer must still refuse to
+touch it. It is not a test of whether the window is long enough. It is a test
+that the window does not exist.
+
+### Why a dead owner is still recoverable
+
+`ESRCH` from the probe means no such process, and the lock is reclaimed on the
+spot — no waiting out a stale window, so recovery is now *faster* than the
+mechanism it replaces. A real child that exits still holding the lock is followed
+by a write that simply succeeds.
+
+`lockAbandonMs` survives for exactly one case: a lock whose `owner.json` is
+missing or corrupt, where there is no owner to ask about. Bounded, so a damaged
+lock cannot wedge a project permanently.
+
+### Process ids are not identities
+
+A pid is used for one thing — asking the kernel whether *something* with that
+number is running — and never to decide whose lock this is. Ownership is the
+nonce. Two forms of reuse are ruled out outright:
+
+| Signal | Conclusion |
+| --- | --- |
+| `EPERM` | something holds that pid but we may not signal it, so it is not one of our writers — they run as this user |
+| our own pid, different `startedAt` | a lock claiming *this* process's pid but a different process start time was written by an earlier process that held the number |
+
+What is **not** detected: reuse by another process of the same user. See
+limitation 7.
+
+### Why an old owner cannot delete a new owner's lock
+
+The previous protocol did `read → compare nonce → unlink`: three operations, so
+an owner whose lock had been reclaimed could pass the check, be descheduled, and
+delete a lock somebody else had since acquired. Re-reading before the unlink
+narrowed the window; nothing could close it, because there is no
+compare-and-unlink on a filesystem.
+
+With the nonce in the **name** there is nothing to compare:
+
+```
+release()          removes _locks/<my nonce>          and no other path
+stale recovery     removes _locks/<the nonce it saw>  and no other path
+```
+
+A newer owner's lock has a **different name**, so an older owner cannot address
+it — not rarely, not with a narrow window, but never. The same holds in reverse:
+a reclaimer acting on a stale observation names the nonce it saw, finds nothing,
+and leaves the lock acquired since untouched. Both directions are tested
+directly, by controlling the ordering rather than racing for it — the claim is
+not that the interleaving is unlikely, it is that the interleaving cannot do
+damage.
+
+### Why there is a gate
+
+Nonce-named directories are not mutually exclusive on their own — two writers
+would simply create two different names. So acquisition funnels through one fixed
+name, `_gate`, created with `mkdir`. The winner checks that no owner exists,
+writes its metadata, and **renames the gate to its own nonce**. Only the gate
+holder can produce an owner directory, and only after finding none, so at most one
+exists at a time.
+
+Clearing an orphaned gate is harmless **by construction** rather than by timing:
+a holder whose gate is gone fails its rename with `ENOENT` and retries, so a
+cleared gate can never become a second owner. The remaining ordering — a holder
+that stalls between taking the gate and renaming it, and renames a gate that is
+by then somebody else's — is settled by a post-check in which the lowest nonce
+keeps the lock and everyone else yields. A total order, so it terminates.
+
+### The post-publish re-count is not the lock
+
+It is kept, and it is explicitly **defence in depth**. By the time it could
+detect a breach the protected operation has already happened, which is what makes
+it a safety net rather than mutual exclusion. The hard bound comes from the
+ownership protocol above. §13 shows the difference rather than asserting it: with
+the re-count disabled and the lock intact, the concurrent quota test still
+passes; with the lock disabled, the mutual-exclusion test fails.
 
 ---
 
@@ -416,14 +522,22 @@ refusal message contains neither the store root nor a path separator.
    it against a clock.
 6. **An empty store is a valid state** and no experience has been invented to
    fill it.
-7. **Breaking a stale lock is a heuristic.** It is safe against a dead holder and
-   unsafe against a live one stalled past `lockStaleMs`. The post-publish
-   re-count covers that case, but not instantaneously: the extra record exists
-   for the microseconds between the rename and the undo, and a process killed in
-   exactly that gap leaves the project **one** over its ceiling. That state is
-   stable and safe rather than progressive — the next new write sees a count at
-   or above the ceiling and refuses — so it cannot grow. It is not repaired
-   automatically, because repairing it would mean deleting stored experience.
+7. **Process-id reuse by the same user is not detected.** If an owner dies and
+   the operating system hands its pid to another process belonging to this user,
+   the liveness probe answers "alive" and that project's lock is never reclaimed.
+   The consequence is bounded and is a **liveness** failure, not a safety one:
+   the quota invariant still holds, writes to that one project return
+   `storage_busy` (retryable, nothing lost), and reads and listings are
+   unaffected because they take no lock. Recovery is deleting one directory.
+
+   This is deliberately **not** patched with a timeout, because a timeout is
+   exactly the mechanism that was just removed for being unable to tell a slow
+   owner from a dead one. Closing it properly needs a process identity the
+   kernel will vouch for. `/proc/<pid>` on Linux exposes a start time that would
+   do it; there is no portable equivalent, and platform-specific code that
+   cannot be exercised on the supported development platform would be a claim
+   without evidence behind it. Recorded as the known gap rather than covered by
+   an untested branch.
 8. **The quota is not a security boundary.** Anyone who can write into the
    project directory can plant record-shaped files, or delete real ones, and
    change the count that way. The quota is a resource bound against concurrent
@@ -440,7 +554,7 @@ refusal message contains neither the store root nor a path separator.
 
 ---
 
-## 13. How the quota correction was verified
+## 13. How the quota and lock corrections were verified
 
 Concurrency tests use **real, separate OS processes**. `Promise.all` inside one
 JavaScript process would prove nothing: the defect is *between* processes, and an
@@ -459,24 +573,49 @@ old algorithm, 4,999 records, 6 concurrent writers  →  5,005 records   ceiling
 corrected store, same fixture and barrier           →  5,000 records   1 success
 ```
 
-### Mutation results — which defence is actually holding
+The final-slot race runs over **three independent projects**, and that repetition
+earned its place: under the "both defences disabled" mutation below, the first
+round passed and the **second** round was the one that broke, with 5 successes.
+A single round would have reported a clean result on a broken store.
 
-| Mutation (applied to the built code) | Result |
-| --- | --- |
-| `acquire()` grants the lock unconditionally | the mutual-exclusion test **fails** — the second process entered 263 ms before the first left |
-| `acquire()` unconditional, post-publish re-count still live | the six-writer invariant test **passes** — the re-count caught the extra writer and undid its publish |
-| both disabled | the six-writer test **fails** — 2 successes, ceiling broken |
+### Mutation results — which mechanism is actually holding
 
-Read honestly: the six-writer test proves *the invariant*, which two mechanisms
-defend, so it does not on its own isolate the lock. The mutual-exclusion test
-isolates the lock. Both mechanisms are load-bearing, and the middle row is the
-evidence that the second one is not decoration.
+| Mutation | Test | Result |
+| --- | --- | --- |
+| `ownerIsAlive` always reports dead (age-based reclaim, taken to its logical end) | live-owner-not-evicted | **fails** — the writer stole a living owner's lock and succeeded |
+| `release()` removes the lock directory instead of naming its own nonce (the old delete's shape) | old-owner-cannot-delete-new | **fails** — the displaced owner destroyed the new owner's lock |
+| `acquire()` returns a lock without taking one | mutual exclusion | **fails** — the second process entered while the first was still inside |
+| post-publish re-count disabled, **lock intact** | final-slot race ×3 | **passes** — the lock alone holds the ceiling |
+| lock **and** re-count both disabled | final-slot race ×3 | **fails** — 5 successes in round 2 |
 
-### Crash recovery
+The fourth row is the one that matters for the review question. It is the
+evidence that the hard bound comes from mutual exclusion and not from eventual
+cleanup: remove the safety net and the invariant still holds; remove the lock and
+it does not.
 
-A real child process takes the project lock and exits without releasing it —
-genuine orphaning, not a simulated file. A writer then reports `storage_busy`
-with nothing written; once the lock is aged past `lockStaleMs` it is broken and
-capacity returns. Abandoned temporary files are separately shown to consume no
-quota and to be cleared only once they are old enough not to belong to a write in
-flight.
+### Ownership and crash recovery
+
+- **Live stalled owner** — a real child takes the lock and then blocks
+  synchronously and permanently. Its lock is backdated by ten times
+  `lockAbandonMs`. A writer must refuse (`storage_busy`) and leave the lock
+  alone; nothing is written. When that child is then killed, the next write
+  succeeds immediately.
+- **Dead owner** — a real child exits still holding the lock. The next write
+  succeeds with no backdating and no waiting.
+- **Killed immediately after publication** — a child is terminated from *inside*
+  the publish callback, the instant the record file exists, so termination lands
+  exactly at the narrow point rather than approximately at it. The record
+  survives, no cached counter exists to be out of step with it, the next writer
+  recovers on its own, and the count is right.
+- **Ownership replacement** — both directions are tested by controlling the
+  ordering rather than racing for it: an old owner releasing late, and a
+  reclaimer acting on a stale observation. Neither can touch the lock acquired
+  since.
+- **Process-id reuse** — a lock recorded against this process's own pid but a
+  different start time is treated as abandoned, because it cannot be ours.
+- **Project isolation** — a live lock held on one project leaves another
+  project's writes entirely unaffected.
+- **Corrupt lock metadata** — honoured while fresh, reclaimed once older than
+  `lockAbandonMs`, so a damaged lock cannot wedge a project permanently.
+- **Temporary files** — shown to consume no quota and to be cleared only once
+  they are old enough not to belong to a write in flight.

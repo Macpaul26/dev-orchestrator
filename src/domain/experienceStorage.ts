@@ -38,22 +38,37 @@ export const EXPERIENCE_STORAGE_LIMITS = {
   /** Entries a single directory scan will read before it stops AND SAYS SO. */
   maxDirectoryEntries: 20_000,
   /**
-   * How long a project write lock may go untouched before another process may
-   * break it.
+   * How long a lock whose owner metadata CANNOT BE READ may sit before it is
+   * reclaimed.
    *
-   * The critical section is a bounded directory scan plus one small file write
-   * - milliseconds. Thirty seconds is four orders of magnitude of headroom, so
-   * a lock this old almost certainly belongs to a process that died. "Almost
-   * certainly" is the honest word: see `ProjectLock` for what breaking a lock
-   * does and does not guarantee.
+   * Note what this is not. It is not "how long before a lock goes stale" -
+   * there is no such rule any more. A lock with readable owner metadata is
+   * reclaimed when its owner is proved dead and never merely because it is old,
+   * however old it gets. This bound exists only for a lock whose metadata is
+   * missing or corrupt, where there is no owner to ask about. See `ProjectLock`.
    */
-  lockStaleMs: 30_000,
+  lockAbandonMs: 60_000,
+  /**
+   * How long the transient acquisition gate may sit before it is cleared.
+   *
+   * The gate is held for microseconds - a directory create, a small write and a
+   * rename. Clearing a live one is harmless by construction: its holder's
+   * rename then fails and it simply retries, so it can never become a second
+   * owner. Ten seconds is generous for an operation measured in microseconds.
+   */
+  gateAbandonMs: 10_000,
+  /** How long an orphaned temporary record file may sit before it is cleared. */
+  temporaryAbandonMs: 30_000,
   /** How long a writer waits for the project lock before reporting contention. */
   lockAcquireTimeoutMs: 5_000,
   /** Longest pause between lock attempts. */
   lockPollMaxMs: 50,
   /** Abandoned temporary files one write may clear up. Bounded on purpose. */
   maxTemporaryCleanupsPerWrite: 64,
+  /** Entries the lock directory scan will read. Locks are few by construction. */
+  maxLockEntries: 64,
+  /** Bytes of lock owner metadata that will be read. It is a few hundred. */
+  maxLockOwnerBytes: 1024,
 } as const;
 
 /**
@@ -217,6 +232,35 @@ export const ExperienceWriteFailure = z.object({
   message: z.string().max(300),
 }).strict();
 export type ExperienceWriteFailure = z.infer<typeof ExperienceWriteFailure>;
+
+/**
+ * WHO HOLDS A PROJECT WRITE LOCK.
+ *
+ * Written once, when the lock is taken, and never updated - there is no
+ * heartbeat, because a heartbeat cannot distinguish a dead process from one
+ * blocked inside the critical section, which is exactly the distinction that
+ * matters.
+ *
+ * `pid` IS NOT AN IDENTITY. Process ids are reused, so it is used only to ask
+ * the kernel a liveness question, never to decide whose lock this is. Identity
+ * is `nonce`, and it lives in the lock's DIRECTORY NAME rather than in this
+ * file, so that removing a lock can only ever name one specific lock.
+ *
+ * `startedAt` is the owner's own process start time. It catches one real case
+ * of process-id reuse: a lock recorded against THIS process's pid but a
+ * different start time cannot be ours, so its writer is gone.
+ */
+export const LockOwner = z.object({
+  version: z.literal(1),
+  /** The lock's identity. Must equal the directory name that contains it. */
+  nonce: z.string().uuid(),
+  /** A liveness handle only. Never proof of identity. */
+  pid: z.number().int().positive(),
+  /** The owning process's start time, in epoch milliseconds. */
+  startedAt: z.number().int().nonnegative(),
+  acquiredAt: z.string().datetime(),
+}).strict();
+export type LockOwner = z.infer<typeof LockOwner>;
 
 /**
  * HOW MANY RECORDS A PROJECT HOLDS - OR AS MUCH AS COULD BE ESTABLISHED.

@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { EXPERIENCE_STORAGE_LIMITS } from "../domain/experienceStorage.js";
+import {
+  EXPERIENCE_STORAGE_LIMITS, LockOwner,
+  type LockOwner as TLockOwner,
+} from "../domain/experienceStorage.js";
 
 /**
  * THE PROJECT QUOTA GATE
@@ -36,8 +39,12 @@ import { EXPERIENCE_STORAGE_LIMITS } from "../domain/experienceStorage.js";
  *     MODEL  ->  EXPERIENCE AUTHORITY  still impossible
  */
 
-/** The project write lock. Not a record; never listed as one. */
-const LOCK_FILE = "_lock";
+/** Where a project keeps its write locks. Not a record; never listed as one. */
+const LOCK_DIR = "_locks";
+/** The transient acquisition gate inside it. */
+const GATE_NAME = "_gate";
+/** Owner metadata inside a lock directory. */
+const OWNER_FILE = "owner.json";
 
 /** Shared word used only to park the thread. Never read for its value. */
 const PARK = new Int32Array(new SharedArrayBuffer(4));
@@ -122,91 +129,163 @@ export interface HeldLock {
   readonly nonce: string;
 }
 
+/** UUID v4, as `crypto.randomUUID` produces and as a lock directory is named. */
+const NONCE_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * This process's start time, in epoch milliseconds.
+ *
+ * Computed once. `process.uptime()` keeps advancing, so recomputing it later
+ * would yield the same answer only to within the clock's drift, and the
+ * comparison it feeds needs to be stable.
+ */
+const OWN_STARTED_AT = Math.round(Date.now() - process.uptime() * 1000);
+
+/** Two start times this far apart cannot belong to the same process instance. */
+const START_TIME_TOLERANCE_MS = 5_000;
+
+/**
+ * IS THE PROCESS THAT WROTE THIS LOCK STILL RUNNING?
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE KERNEL IS ASKED, AND NOT THE CLOCK
+ * ---------------------------------------------------------------------------
+ * The previous implementation decided a lock was abandoned when it got old.
+ * That is not a liveness test, it is a guess, and independent review was right
+ * that it made the lock stealable from an owner that was merely slow. A paused
+ * VM, a suspended process or a filesystem that hangs for half a minute would
+ * have had its lock taken out from under it while it was still inside the
+ * critical section.
+ *
+ * `process.kill(pid, 0)` sends no signal; it asks the kernel whether that
+ * process exists. Crucially it answers correctly for a process that is ALIVE
+ * BUT BLOCKED, which no heartbeat scheme can do - a heartbeat needs the owner
+ * to run in order to prove it is alive, and a blocked owner cannot run. That is
+ * the whole reason this is a kernel question rather than an application one.
+ *
+ * ---------------------------------------------------------------------------
+ * PROCESS IDS ARE NOT IDENTITIES
+ * ---------------------------------------------------------------------------
+ * A pid can be reused after its process dies. So a pid is used here for exactly
+ * one thing - asking whether SOMETHING with that number is running - and never
+ * to decide whose lock this is. Ownership is the nonce in the directory name.
+ *
+ * Two forms of reuse are detected outright:
+ *
+ *   EPERM          something holds that pid but we may not signal it, so it is
+ *                  not one of our writers - they run as this user.
+ *   our own pid,   a lock claiming THIS process's pid but a different start
+ *   wrong start    time was written by an earlier process that held the number.
+ *
+ * What is NOT detected: reuse by another process of the same user. That case
+ * reads as "alive", the lock is never broken, and writes to that ONE project
+ * return `storage_busy`. It costs availability, never correctness - and it is
+ * recorded as the residual limitation in docs/PHASE-009.md rather than papered
+ * over with a timeout that would bring the original defect straight back.
+ */
+function ownerIsAlive(owner: TLockOwner): boolean {
+  if (owner.pid === process.pid
+    && Math.abs(owner.startedAt - OWN_STARTED_AT) > START_TIME_TOLERANCE_MS) {
+    return false; // Our pid, not our process: it was reused after that one died.
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH: no such process. EPERM: exists, but is not one of ours.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH"
+      && (error as NodeJS.ErrnoException).code !== "EPERM"
+      // Anything unexpected is treated as alive: refusing to break a lock is
+      // always the safe direction, and the cost is bounded contention.
+      ? true
+      : false;
+  }
+}
+
 /**
  * A cross-process mutual exclusion lock for one project directory.
  *
  * ---------------------------------------------------------------------------
- * WHY A LOCKFILE AND NOT AN IN-MEMORY MUTEX
+ * WHY A LOCK ON DISK AND NOT AN IN-MEMORY MUTEX
  * ---------------------------------------------------------------------------
- * A JavaScript mutex protects one process from itself. The durability test in
- * this suite writes from a genuinely separate OS process, and real runs are
- * separate processes too, so an in-memory mutex would protect nothing that
- * needed protecting. Exclusive create - `open(..., "wx")` - is atomic on both
- * POSIX and Windows and is the primitive this is built on.
+ * A JavaScript mutex protects one process from itself. This store is written
+ * from separate OS processes - the durability test proves it - so a mutex would
+ * have protected nothing that needed protecting while making a single-process
+ * test go green.
  *
  * ---------------------------------------------------------------------------
- * WHAT BREAKING A STALE LOCK CAN AND CANNOT GUARANTEE
+ * THE LAYOUT, AND WHY THE NONCE IS IN THE NAME
  * ---------------------------------------------------------------------------
- * A process that dies holding the lock would otherwise block its project
- * forever, so a lock untouched for longer than `lockStaleMs` may be broken by
- * whoever finds it. That is a HEURISTIC and it is stated as one:
+ *     <project>/_locks/_gate                transient, held for microseconds
+ *     <project>/_locks/<nonce>/owner.json   the lock; its NAME is its identity
  *
- *   - It is safe against the case it exists for - a dead holder - because a
- *     dead process cannot be in the critical section.
- *   - It is NOT safe against a live holder stalled longer than the stale
- *     window: a paused VM, a suspended process, a filesystem that hangs for
- *     half a minute. Two writers could then both believe they hold the lock.
+ * Putting the identity in the DIRECTORY NAME rather than inside the file is the
+ * whole trick, and it is what closes the release race independent review found.
+ * The previous protocol did:
  *
- * That residual case is covered separately, by re-checking the ceiling AFTER
- * publishing and undoing an over-ceiling write (`ProjectQuota`). Neither
- * mechanism is claimed to be airtight on its own, and the combination is
- * described honestly in docs/PHASE-009.md rather than rounded up to "safe".
+ *     read the lock -> is the nonce mine? -> delete the lock
  *
- * There is no compare-and-unlink on a filesystem, so both breaking and
- * releasing re-check ownership immediately before removing the file. That
- * NARROWS the window between the check and the unlink. It does not close it.
+ * which is three operations, not one. An owner whose lock had been broken could
+ * pass the check, be descheduled, and then delete a lock a DIFFERENT process had
+ * since acquired. Re-reading before the unlink narrowed that window; nothing
+ * could close it, because there is no compare-and-unlink on a filesystem.
+ *
+ * With the nonce in the name there is nothing to compare. `release` removes
+ * `_locks/<my nonce>` and no other path exists for it to remove. A newer owner's
+ * lock has a DIFFERENT NAME, so an older owner cannot reach it - not rarely, not
+ * with a narrow window, but never. Stale recovery is the same shape: it removes
+ * `_locks/<the nonce it observed>`, so if that owner released and someone else
+ * acquired in between, the removal finds nothing and the new owner is untouched.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THERE IS A GATE
+ * ---------------------------------------------------------------------------
+ * Nonce-named directories are not mutually exclusive on their own: two writers
+ * would simply create two different names. So acquisition funnels through one
+ * fixed name, `_gate`, created with `mkdir`, which is atomic and admits exactly
+ * one winner. The winner checks that no owner exists, writes its metadata, and
+ * RENAMES the gate to its own nonce. Only the gate holder can produce an owner
+ * directory, and only after finding none - so at most one exists at a time.
+ *
+ * A gate can be orphaned by a crash between the create and the rename. Clearing
+ * one is harmless BY CONSTRUCTION rather than by timing: if a live holder's gate
+ * is cleared, its rename fails with ENOENT and it retries. A cleared gate can
+ * therefore never become a second owner. The post-check below covers the
+ * remaining ordering: a holder that resumes late and renames a gate that is by
+ * then somebody else's yields unless it holds the lowest nonce.
+ *
+ * ---------------------------------------------------------------------------
+ * AGE NO LONGER DECIDES ANYTHING
+ * ---------------------------------------------------------------------------
+ * There is no `lockStaleMs`. A lock with readable owner metadata is reclaimed
+ * when its owner is PROVED DEAD - see `ownerIsAlive` - and never because it is
+ * old, however old it gets. A live owner stalled for an hour keeps its lock.
+ * `lockAbandonMs` applies only to a lock whose metadata cannot be read at all,
+ * where there is no owner left to ask about.
  */
 export class ProjectLock {
-  readonly #file: string;
+  readonly #dir: string;
 
-  constructor(dir: string) {
-    this.#file = path.join(dir, LOCK_FILE);
+  constructor(projectDir: string) {
+    this.#dir = path.join(projectDir, LOCK_DIR);
   }
 
-  /** The lock file's path, so callers can prove it is never read as a record. */
-  static fileName(): string {
-    return LOCK_FILE;
+  /** The lock directory's name, so callers can prove it is never a record. */
+  static directoryName(): string {
+    return LOCK_DIR;
   }
 
   /**
    * Take the lock, or return null if it could not be taken in time.
    *
-   * Null is CONTENTION, not failure and not quota exhaustion. Nothing has been
-   * written and nothing has been consumed.
+   * Null is CONTENTION - not failure, and not quota exhaustion. Nothing has been
+   * written and nothing has been consumed, so the caller may simply retry.
    */
   acquire(): HeldLock | null {
     const deadline = Date.now() + EXPERIENCE_STORAGE_LIMITS.lockAcquireTimeoutMs;
-    let breaks = 0;
-
     for (let attempt = 0; ; attempt += 1) {
-      const nonce = crypto.randomUUID();
-      try {
-        // Exclusive create: exactly one caller can win this, ever.
-        const handle = fs.openSync(this.#file, "wx", 0o600);
-        try {
-          fs.writeFileSync(handle, JSON.stringify({
-            pid: process.pid,
-            nonce,
-            acquiredAt: new Date().toISOString(),
-          }), "utf8");
-          fs.fsyncSync(handle);
-        } finally {
-          fs.closeSync(handle);
-        }
-        return { nonce };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
-
-      if (this.#breakIfStale()) {
-        breaks += 1;
-        // Bounded: if something keeps planting pre-aged locks, give up rather
-        // than loop. That is a local attacker with write access to the store,
-        // which this store never claimed to defend against.
-        if (breaks > 8) return null;
-        continue;
-      }
-
+      const held = this.#attempt();
+      if (held !== null) return held;
       if (Date.now() >= deadline) return null;
       park(pollDelay(attempt));
     }
@@ -215,41 +294,148 @@ export class ProjectLock {
   /**
    * Release a lock this process took.
    *
-   * The nonce check is the point: if our lock was broken as stale and someone
-   * else now holds it, removing the file would hand a third writer a lock that
-   * is still in use. When the nonce does not match, we leave it alone - our
-   * lock is already gone.
+   * Names ONLY this holder's own nonce. There is no read, no comparison and no
+   * window: a lock acquired by anybody else has a different name and is not
+   * addressable from here.
    */
   release(held: HeldLock): void {
+    if (!NONCE_SHAPE.test(held.nonce)) return;
     try {
-      const owner = JSON.parse(fs.readFileSync(this.#file, "utf8")) as { nonce?: unknown };
-      if (owner.nonce !== held.nonce) return;
-    } catch {
-      return; // Unreadable or already gone; nothing of ours to remove.
-    }
-    try { fs.rmSync(this.#file, { force: true }); } catch { /* best effort */ }
+      fs.rmSync(path.join(this.#dir, held.nonce), { recursive: true, force: true });
+    } catch { /* best effort; a lock already gone is the desired state */ }
   }
 
-  /** True only when a lock older than the stale window was actually removed. */
-  #breakIfStale(): boolean {
-    let before: fs.Stats;
+  /** One acquisition attempt. Null means "not this time", never an error. */
+  #attempt(): HeldLock | null {
     try {
-      before = fs.statSync(this.#file);
+      fs.mkdirSync(this.#dir, { recursive: true });
     } catch {
-      return false; // Released while we looked; the next attempt will take it.
+      return null;
     }
-    if (Date.now() - before.mtimeMs <= EXPERIENCE_STORAGE_LIMITS.lockStaleMs) return false;
 
+    // Clear out owners whose processes are gone. Each removal names one nonce.
+    this.#reclaimDeadOwners();
+
+    // A live owner is never disturbed, however old its lock is.
+    if (this.#owners().length > 0) return null;
+
+    const gate = path.join(this.#dir, GATE_NAME);
     try {
-      // Re-stat immediately before removing: a lock released and re-taken since
-      // the age check has a different mtime and must not be broken.
-      const after = fs.statSync(this.#file);
-      if (after.mtimeMs !== before.mtimeMs) return false;
-      fs.rmSync(this.#file, { force: true });
-      return true;
-    } catch {
-      return false;
+      // Atomic, and admits exactly one winner.
+      fs.mkdirSync(gate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") this.#clearAbandonedGate();
+      return null;
     }
+
+    const nonce = crypto.randomUUID();
+    try {
+      // Re-check under the gate: an owner may have appeared while we queued.
+      if (this.#owners().length > 0) {
+        fs.rmSync(gate, { recursive: true, force: true });
+        return null;
+      }
+      const owner: TLockOwner = LockOwner.parse({
+        version: 1,
+        nonce,
+        pid: process.pid,
+        startedAt: OWN_STARTED_AT,
+        acquiredAt: new Date().toISOString(),
+      });
+      fs.writeFileSync(path.join(gate, OWNER_FILE), JSON.stringify(owner), {
+        encoding: "utf8", mode: 0o600,
+      });
+      // The gate BECOMES the lock. Nothing else can produce an owner directory.
+      fs.renameSync(gate, path.join(this.#dir, nonce));
+    } catch {
+      // Including ENOENT, which means our gate was cleared while we held it.
+      // That is the benign case: we never became an owner.
+      try { fs.rmSync(gate, { recursive: true, force: true }); } catch { /* gone */ }
+      return null;
+    }
+
+    /**
+     * Post-check for the one ordering the gate cannot rule out: a holder that
+     * stalls between taking the gate and renaming it can rename a gate that has
+     * since been cleared and re-created by somebody else, leaving two owners.
+     * The lowest nonce keeps the lock and everyone else yields - a total order,
+     * so this terminates rather than ping-ponging.
+     */
+    const owners = this.#owners();
+    if (owners.length > 1 && [...owners].sort()[0] !== nonce) {
+      this.release({ nonce });
+      return null;
+    }
+    return { nonce };
+  }
+
+  /** Nonce-named lock directories, bounded. Locks are few by construction. */
+  #owners(): string[] {
+    try {
+      return scanDirectoryBounded(this.#dir, EXPERIENCE_STORAGE_LIMITS.maxLockEntries)
+        .names.filter((name) => NONCE_SHAPE.test(name));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Remove locks whose owning process is gone.
+   *
+   * Every removal names one specific nonce, so a lock acquired after the
+   * observation is a different name and cannot be caught by it.
+   */
+  #reclaimDeadOwners(): void {
+    for (const nonce of this.#owners()) {
+      const lock = path.join(this.#dir, nonce);
+      const owner = readOwner(path.join(lock, OWNER_FILE));
+
+      if (owner === null) {
+        // No owner to ask about. This is the ONLY place age decides anything,
+        // and it is bounded so a corrupt lock cannot wedge a project forever.
+        try {
+          if (Date.now() - fs.statSync(lock).mtimeMs > EXPERIENCE_STORAGE_LIMITS.lockAbandonMs) {
+            fs.rmSync(lock, { recursive: true, force: true });
+          }
+        } catch { /* already gone, or not ours to remove */ }
+        continue;
+      }
+
+      // A lock whose recorded nonce disagrees with its directory name was not
+      // written by this protocol. Treated as unreadable rather than trusted.
+      if (owner.nonce !== nonce || ownerIsAlive(owner)) continue;
+
+      try {
+        fs.rmSync(lock, { recursive: true, force: true });
+      } catch { /* another writer reclaimed it first */ }
+    }
+  }
+
+  /**
+   * Clear a gate nobody finished with.
+   *
+   * Safe whether or not its holder is alive: a holder whose gate is gone fails
+   * its rename and retries, so clearing one can never produce a second owner.
+   */
+  #clearAbandonedGate(): void {
+    const gate = path.join(this.#dir, GATE_NAME);
+    try {
+      if (Date.now() - fs.statSync(gate).mtimeMs <= EXPERIENCE_STORAGE_LIMITS.gateAbandonMs) {
+        return;
+      }
+      fs.rmSync(gate, { recursive: true, force: true });
+    } catch { /* already cleared */ }
+  }
+}
+
+/** Read and validate lock owner metadata. Null if it is missing or not ours. */
+function readOwner(file: string): TLockOwner | null {
+  try {
+    if (fs.statSync(file).size > EXPERIENCE_STORAGE_LIMITS.maxLockOwnerBytes) return null;
+    const parsed = LockOwner.safeParse(JSON.parse(fs.readFileSync(file, "utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
   }
 }
 
@@ -336,7 +522,7 @@ export class ProjectQuota {
    *   3. refuse if incomplete      an unprovable ceiling is not a ceiling
    *   4. refuse if full and new    an overwrite is not growth and never refused
    *   5. publish                   atomically, by the caller
-   *   6. re-count if new           the only cover for a wrongly broken lock
+   *   6. re-count if new           defence in depth, never the invariant
    *   7. undo if over              a failed write leaves nothing behind
    *   8. release the lock          in a finally, including on a thrown publish
    */
@@ -375,9 +561,10 @@ export class ProjectQuota {
       if (slotConsumed) {
         const settled = this.#verifyCeiling(request);
         if (settled !== null) {
-          // Over the ceiling despite the lock, so the lock was not respected:
-          // most plausibly ours was broken as stale while we were stalled. Undo
-          // our own publish rather than leave the project oversubscribed.
+          // Over the ceiling despite holding the lock, which should be
+          // unreachable: it would mean two writers were admitted at once. Undo
+          // our own publish rather than leave the project oversubscribed, and
+          // report the refusal so the condition is visible rather than silent.
           try { request.unpublish(); } catch { /* best effort */ }
           return { ok: false, reason: "quota_exceeded", records: settled };
         }
@@ -398,14 +585,20 @@ export class ProjectQuota {
   /**
    * Re-count after publishing. Returns the count only if it broke the ceiling.
    *
-   * This is the bounded self-correction for the one case mutual exclusion
-   * cannot cover: a holder stalled past `lockStaleMs`, whose lock was broken
-   * while it was still live. It is not instant - the extra record exists for
-   * the microseconds between the rename and the undo - and a process killed in
-   * exactly that gap leaves the project one over its ceiling. That state is
-   * stable and safe rather than progressive: the next new write sees a count at
-   * or above the ceiling and refuses, so it cannot grow. Recorded as a known
-   * limitation in docs/PHASE-009.md, not smoothed over.
+   * ---------------------------------------------------------------------------
+   * DEFENCE IN DEPTH. NOT THE INVARIANT.
+   * ---------------------------------------------------------------------------
+   * The hard bound comes from mutual exclusion - one owner at a time, decided
+   * before anything is published. This runs afterwards, so by the time it could
+   * detect a breach the protected operation has already happened. That makes it
+   * a safety net, and a safety net is not a lock. It is kept because it costs
+   * one bounded scan and would catch a defect in the lock protocol that testing
+   * missed, which is exactly what a second layer is for.
+   *
+   * It must never be read as the reason the ceiling holds. When the lock is
+   * disabled and only this remains, the mutual-exclusion test fails while the
+   * quota test still passes - the suite is arranged to show that difference
+   * rather than let one mechanism stand in for the other.
    *
    * An incomplete re-scan proves nothing, so it is not treated as a breach.
    */
@@ -440,7 +633,7 @@ export class ProjectQuota {
       const file = path.join(this.#dir, name);
       try {
         const stats = fs.statSync(file);
-        if (Date.now() - stats.mtimeMs <= EXPERIENCE_STORAGE_LIMITS.lockStaleMs) continue;
+        if (Date.now() - stats.mtimeMs <= EXPERIENCE_STORAGE_LIMITS.temporaryAbandonMs) continue;
         fs.rmSync(file, { force: true });
         removed += 1;
       } catch { /* someone else cleared it, or it is not ours to remove */ }

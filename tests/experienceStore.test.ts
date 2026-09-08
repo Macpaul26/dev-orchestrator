@@ -620,11 +620,20 @@ describe("corruption handling", () => {
 
 // ===========================================================================
 describe("atomic persistence", () => {
-  it("leaves no temporary files behind", () => {
+  it("leaves no temporary files and no held lock behind", () => {
     store.write("alpha", record());
-    const entries = fs.readdirSync(path.join(tmp, "alpha"));
+    const dir = path.join(tmp, "alpha");
+    const entries = fs.readdirSync(dir);
     expect(entries.filter((n) => n.endsWith(".tmp"))).toEqual([]);
-    expect(entries).toHaveLength(1);
+
+    /**
+     * The project directory holds the record and the lock directory, and the
+     * lock directory holds NOTHING - the write released its lock. Asserting the
+     * lock directory is empty is the stronger claim: an entry left in there
+     * would be a lock still nominally held.
+     */
+    expect(entries.sort()).toHaveLength(2);
+    expect(fs.readdirSync(path.join(dir, "_locks"))).toEqual([]);
   });
 
   it("does not destroy the previous record when a write fails", () => {

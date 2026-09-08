@@ -103,6 +103,33 @@ async function runConcurrently(
   return Promise.all(children);
 }
 
+/** Start a child and expose its first stdout line plus a way to end it. */
+function startChild(script: string, args: string[]): {
+  firstLine: Promise<string>; stop: () => Promise<void>;
+} {
+  const child = spawn(process.execPath, [script, ...args], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let buffered = "";
+  const firstLine = new Promise<string>((resolve) => {
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString();
+      const newline = buffered.indexOf("\n");
+      if (newline >= 0) resolve(buffered.slice(0, newline).trim());
+    });
+    child.on("close", () => { resolve(buffered.trim()); });
+  });
+  const stop = async (): Promise<void> => {
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => { child.on("close", () => { resolve(); }); child.kill(); });
+    }
+  };
+  return { firstLine, stop };
+}
+
+/** The shape of a lock directory name. Identity lives in the NAME. */
+const NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 const compiled = (file: string): string => {
   const full = path.resolve("dist", "experience", file);
   if (!fs.existsSync(full)) {
@@ -234,45 +261,54 @@ describe("the quota holds across concurrent OS processes", () => {
   });
 
   it("lets exactly ONE of six concurrent writers take the final slot", async () => {
-    const dir = seed("alpha", MAX - 1);
-    expect(recordFiles("alpha")).toHaveLength(MAX - 1);
-
+    /**
+     * Repeated across independent projects. One round landing on the right
+     * answer could be one interleaving that happened to be benign; the claim is
+     * about every interleaving, so the race is run more than once.
+     */
     const script = path.join(tmp, "writer.cjs");
     fs.writeFileSync(script, [
       "const { ExperienceStore } = require(process.argv[2]);",
       ...BARRIER,
-      "const [, , , root, startAt, index] = process.argv;",
+      "const [, , , root, project, startAt, index] = process.argv;",
       "waitUntil(Number(startAt));",
       "const store = new ExperienceStore(root);",
-      "const result = store.write('alpha', {",
-      "  scope: 'project', layer: 'episodic', projectId: 'alpha',",
+      "const result = store.write(project, {",
+      "  scope: 'project', layer: 'episodic', projectId: project,",
       "  runId: 'run_' + index, taskType: 'add-endpoint',",
       `  createdAt: '${ISO}',`,
       "});",
       "process.stdout.write(result.ok ? 'OK' : result.failure.code);",
     ].join("\n"));
 
-    const startAt = Date.now() + 400;
-    const results = await runConcurrently(
-      script,
-      (index) => [compiled("experienceStore.js"), tmp, String(startAt), String(index)],
-      CONTENDERS,
-    );
+    for (const round of ["alpha", "beta", "gamma"]) {
+      const dir = seed(round, MAX - 1);
+      expect(recordFiles(round)).toHaveLength(MAX - 1);
 
-    const succeeded = results.filter((r) => r === "OK");
-    expect(succeeded).toHaveLength(1);
+      const startAt = Date.now() + 400;
+      const results = await runConcurrently(
+        script,
+        (index) => [
+          compiled("experienceStore.js"), tmp, round, String(startAt), String(index),
+        ],
+        CONTENDERS,
+      );
 
-    // Every refusal is a bounded, named outcome - never a crash, never silence.
-    for (const result of results.filter((r) => r !== "OK")) {
-      expect(["project_quota_exceeded", "storage_busy"]).toContain(result);
+      expect(results.filter((r) => r === "OK"), `round ${round}`).toHaveLength(1);
+
+      // Every refusal is a bounded, named outcome - never a crash, never silence.
+      for (const result of results.filter((r) => r !== "OK")) {
+        expect(["project_quota_exceeded", "storage_busy"]).toContain(result);
+      }
+
+      // THE INVARIANT. Never MAX + 1, under any interleaving.
+      expect(recordFiles(round), `round ${round}`).toHaveLength(MAX);
+
+      // Six processes contended and every one of them let go.
+      const locks = path.join(dir, ProjectLock.directoryName());
+      expect(fs.existsSync(locks) ? fs.readdirSync(locks) : []).toEqual([]);
     }
-
-    // THE INVARIANT. Never MAX + 1, under any interleaving.
-    expect(recordFiles("alpha")).toHaveLength(MAX);
-
-    // Six processes contended for the lock and every one of them let go of it.
-    expect(fs.existsSync(path.join(dir, ProjectLock.fileName()))).toBe(false);
-  });
+  }, 110_000);
 
   it("serialises two processes inside the critical section, provably", async () => {
     /**
@@ -357,16 +393,224 @@ describe("the quota holds across concurrent OS processes", () => {
 });
 
 // ===========================================================================
-describe("crash recovery", () => {
-  const lockFile = (projectId: string): string =>
-    path.join(tmp, projectId, ProjectLock.fileName());
+describe("lock ownership", () => {
+  const lockDir = (projectId: string): string =>
+    path.join(tmp, projectId, ProjectLock.directoryName());
 
-  /** Backdate a file so it looks abandoned, without waiting 30 real seconds. */
-  function age(file: string, ms = EXPERIENCE_STORAGE_LIMITS.lockStaleMs + 5_000): void {
-    const when = new Date(Date.now() - ms);
-    fs.utimesSync(file, when, when);
+  /** Nonce-named lock directories currently present. */
+  function owners(projectId: string): string[] {
+    const dir = lockDir(projectId);
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir).filter((name) => NONCE.test(name));
   }
 
+  /** Backdate an entry so any age-based rule would consider it abandoned. */
+  function age(entry: string, ms = 10 * EXPERIENCE_STORAGE_LIMITS.lockAbandonMs): void {
+    const when = new Date(Date.now() - ms);
+    fs.utimesSync(entry, when, when);
+  }
+
+  it("MANDATORY: a LIVE owner is not evicted, however old its lock looks", async () => {
+    /**
+     * BLOCKER 1. The previous protocol reclaimed a lock once it was older than
+     * `lockStaleMs`, which is a guess about death rather than a test for it. A
+     * process that was merely slow lost its lock while still inside the critical
+     * section.
+     *
+     * The child here is the hardest version of that case: it holds the lock and
+     * then blocks SYNCHRONOUSLY, forever. It cannot renew a heartbeat, touch a
+     * file, or answer a message - anything that required the owner to run in
+     * order to prove it is alive would conclude it is dead. Only the kernel can
+     * tell the difference, which is why the kernel is what gets asked.
+     *
+     * The lock is then backdated by ten times `lockAbandonMs`, so this is not a
+     * test of whether the window is long enough. It is a test that AGE DOES NOT
+     * DECIDE.
+     */
+    fs.mkdirSync(path.join(tmp, "alpha"), { recursive: true });
+    const script = path.join(tmp, "hold-alive.cjs");
+    fs.writeFileSync(script, [
+      "const { ProjectLock } = require(process.argv[2]);",
+      "const held = new ProjectLock(process.argv[3]).acquire();",
+      "process.stdout.write(held === null ? 'NONE\\n' : 'HELD\\n');",
+      // Alive, and permanently blocked. No heartbeat is possible from here.
+      "const park = new Int32Array(new SharedArrayBuffer(4));",
+      "for (;;) { Atomics.wait(park, 0, 0, 1000); }",
+    ].join("\n"));
+
+    const holder = startChild(script, [compiled("projectQuota.js"), path.join(tmp, "alpha")]);
+    expect(await holder.firstLine).toBe("HELD");
+
+    const [nonce] = owners("alpha");
+    expect(nonce).toBeDefined();
+    age(path.join(lockDir("alpha"), nonce!));
+
+    // A writer must refuse to proceed rather than steal a living owner's lock.
+    const blocked = store.write("alpha", record());
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.failure.code).toBe("storage_busy");
+
+    // The owner still holds exactly what it held. Nothing was written.
+    expect(owners("alpha")).toEqual([nonce]);
+    expect(recordFiles("alpha")).toHaveLength(0);
+
+    // And once that owner is genuinely gone, the project recovers immediately -
+    // no waiting out a stale window, because death is now observed, not assumed.
+    await holder.stop();
+    const after = store.write("alpha", record());
+    expect(after.ok).toBe(true);
+    expect(recordFiles("alpha")).toHaveLength(1);
+    expect(owners("alpha")).toEqual([]);
+  });
+
+  it("recovers from an owner that died without releasing", async () => {
+    fs.mkdirSync(path.join(tmp, "alpha"), { recursive: true });
+    const script = path.join(tmp, "die-holding.cjs");
+    fs.writeFileSync(script, [
+      "const { ProjectLock } = require(process.argv[2]);",
+      "const held = new ProjectLock(process.argv[3]).acquire();",
+      "process.stdout.write(held === null ? 'NONE' : 'HELD');",
+      "process.exit(0);", // Exits still holding it. Nothing cleans up after it.
+    ].join("\n"));
+
+    const [taken] = await runConcurrently(
+      script, () => [compiled("projectQuota.js"), path.join(tmp, "alpha")], 1,
+    );
+    expect(taken).toBe("HELD");
+    expect(owners("alpha")).toHaveLength(1);
+
+    // No backdating, no waiting: the owner is observably gone.
+    const written = store.write("alpha", record());
+    expect(written.ok).toBe(true);
+    expect(recordFiles("alpha")).toHaveLength(1);
+    expect(owners("alpha")).toEqual([]);
+  });
+
+  it("an OLD owner cannot delete a NEW owner's lock", () => {
+    /**
+     * BLOCKER 2, and it is now a property of the naming rather than a race that
+     * has been made narrow. The old protocol read the lock, compared a nonce,
+     * then unlinked - three operations, so an owner whose lock had been
+     * reclaimed could pass the check, be descheduled, and delete a lock somebody
+     * else had since acquired.
+     *
+     * Ordering is controlled deliberately here rather than raced for. The claim
+     * is not "this interleaving is unlikely"; it is that the interleaving CANNOT
+     * do damage, because `release` can only name the caller's own nonce and a
+     * newer owner has a different one. That is testable directly, and a test
+     * that had to catch it by racing would be the weaker evidence.
+     */
+    const dir = path.join(tmp, "alpha");
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = new ProjectLock(dir);
+
+    const first = lock.acquire();
+    expect(first).not.toBeNull();
+
+    // Its lock is reclaimed underneath it, exactly as dead-owner recovery would.
+    fs.rmSync(path.join(lockDir("alpha"), first!.nonce), { recursive: true, force: true });
+
+    const second = lock.acquire();
+    expect(second).not.toBeNull();
+    expect(second!.nonce).not.toBe(first!.nonce);
+
+    // The displaced owner now releases, late. It must not touch the new lock.
+    lock.release(first!);
+    expect(owners("alpha")).toEqual([second!.nonce]);
+
+    lock.release(second!);
+    expect(owners("alpha")).toEqual([]);
+  });
+
+  it("stale recovery cannot delete a newly acquired lock", () => {
+    const dir = path.join(tmp, "alpha");
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = new ProjectLock(dir);
+
+    const first = lock.acquire();
+    // What a reclaimer would have observed before deciding to act.
+    const observed = first!.nonce;
+    lock.release(first!);
+
+    const second = lock.acquire();
+    expect(second!.nonce).not.toBe(observed);
+
+    // The reclaimer acts on its stale observation. It names the nonce it saw,
+    // so it finds nothing, and the lock acquired since is untouched.
+    fs.rmSync(path.join(lockDir("alpha"), observed), { recursive: true, force: true });
+    expect(owners("alpha")).toEqual([second!.nonce]);
+  });
+
+  it("does not treat a reused process id as proof the owner is alive", () => {
+    /**
+     * A lock recorded against THIS process's pid but a different start time was
+     * written by an earlier process that happened to hold the same number. The
+     * pid probe would say "alive" - it is us - so the start time is what
+     * distinguishes the instance.
+     */
+    const dir = path.join(tmp, "alpha");
+    fs.mkdirSync(dir, { recursive: true });
+    const nonce = "00000000-0000-4000-8000-000000000001";
+    const lock = path.join(lockDir("alpha"), nonce);
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      version: 1,
+      nonce,
+      pid: process.pid, // alive, and definitely signallable: it is us
+      startedAt: 1, // but not when this process started
+      acquiredAt: new Date().toISOString(),
+    }));
+
+    const written = store.write("alpha", record());
+    expect(written.ok).toBe(true);
+    expect(owners("alpha")).toEqual([]);
+  });
+
+  it("reclaims a lock whose owner metadata is unreadable, but only when old", () => {
+    const dir = path.join(tmp, "alpha");
+    fs.mkdirSync(dir, { recursive: true });
+    const nonce = "00000000-0000-4000-8000-000000000002";
+    const lock = path.join(lockDir("alpha"), nonce);
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), "not json at all");
+
+    // Fresh: there is no owner to ask about, so it is left alone.
+    const blocked = store.write("alpha", record());
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.failure.code).toBe("storage_busy");
+
+    // Old enough that nothing is going to claim it: bounded, so a corrupt lock
+    // cannot wedge a project permanently.
+    age(lock);
+    expect(store.write("alpha", record()).ok).toBe(true);
+  });
+
+  it("keeps one project's lock out of another project's way", async () => {
+    fs.mkdirSync(path.join(tmp, "alpha"), { recursive: true });
+    const script = path.join(tmp, "hold-alpha.cjs");
+    fs.writeFileSync(script, [
+      "const { ProjectLock } = require(process.argv[2]);",
+      "new ProjectLock(process.argv[3]).acquire();",
+      "process.stdout.write('HELD\\n');",
+      "const park = new Int32Array(new SharedArrayBuffer(4));",
+      "for (;;) { Atomics.wait(park, 0, 0, 1000); }",
+    ].join("\n"));
+
+    const holder = startChild(script, [compiled("projectQuota.js"), path.join(tmp, "alpha")]);
+    expect(await holder.firstLine).toBe("HELD");
+
+    // Alpha is locked; beta is nobody else's business.
+    expect(store.write("alpha", record()).ok).toBe(false);
+    expect(store.write("beta", record({ projectId: "beta" })).ok).toBe(true);
+    expect(owners("beta")).toEqual([]);
+    await holder.stop();
+  });
+});
+
+// ===========================================================================
+describe("crash recovery", () => {
   it("a process that dies BEFORE reserving leaves nothing behind", async () => {
     const script = path.join(tmp, "die-early.cjs");
     fs.writeFileSync(script, ["process.exit(0);"].join("\n"));
@@ -376,52 +620,50 @@ describe("crash recovery", () => {
     expect(store.write("alpha", record()).ok).toBe(true);
   });
 
-  it("a process that dies HOLDING the lock blocks writes, then stops blocking", async () => {
+  it("a process killed IMMEDIATELY after publishing loses nothing", async () => {
     /**
-     * A genuinely orphaned lock: a real child takes it and exits without ever
-     * releasing it. Nothing in this process cleans up after it.
+     * The narrow point the brief asks about: the record has reached the disk and
+     * the process dies before releasing the lock or returning. Forced from
+     * inside the publish callback, so termination lands exactly there rather
+     * than approximately there.
      */
-    fs.mkdirSync(path.join(tmp, "alpha"), { recursive: true });
-    const script = path.join(tmp, "die-holding.cjs");
+    const dir = path.join(tmp, "alpha");
+    fs.mkdirSync(dir, { recursive: true });
+    const planted = recordName(7);
+    const script = path.join(tmp, "die-after-publish.cjs");
     fs.writeFileSync(script, [
-      "const { ProjectLock } = require(process.argv[2]);",
-      "const held = new ProjectLock(process.argv[3]).acquire();",
-      "process.stdout.write(held === null ? 'NONE' : 'HELD');",
-      "process.exit(0);",
+      "const { ProjectQuota } = require(process.argv[2]);",
+      "const fs = require('fs'); const path = require('path');",
+      "const [, , , dir, name] = process.argv;",
+      "const shape = /^\\d{8}T\\d{9}Z-[0-9a-f]{32}\\.json$/;",
+      "new ProjectQuota(dir).reserveAndPublish({",
+      "  fileName: name,",
+      "  isRecordName: (n) => shape.test(n),",
+      "  isTemporaryName: (n) => n.endsWith('.tmp'),",
+      "  publish: () => {",
+      "    fs.writeFileSync(path.join(dir, name), '{}');",
+      "    process.exit(3);", // dead the instant the record exists
+      "  },",
+      "  unpublish: () => {},",
+      "});",
     ].join("\n"));
 
-    const [taken] = await runConcurrently(
-      script, () => [compiled("projectQuota.js"), path.join(tmp, "alpha")], 1,
-    );
-    expect(taken).toBe("HELD");
-    expect(fs.existsSync(lockFile("alpha"))).toBe(true);
+    await runConcurrently(script, () => [compiled("projectQuota.js"), dir, planted], 1);
 
-    // While the lock still looks fresh, a writer reports contention. Bounded,
-    // named, and NOTHING WAS WRITTEN - it is not a quota outcome.
-    const blocked = store.write("alpha", record());
-    expect(blocked.ok).toBe(false);
-    if (blocked.ok) return;
-    expect(blocked.failure.code).toBe("storage_busy");
-    expect(recordFiles("alpha")).toHaveLength(0);
+    // The published record survived. Nothing deletes legitimate experience.
+    expect(fs.existsSync(path.join(dir, planted))).toBe(true);
+    expect(recordFiles("alpha")).toEqual([planted]);
 
-    // Once it is older than the stale window, capacity comes back.
-    age(lockFile("alpha"));
-    const after = store.write("alpha", record());
-    expect(after.ok).toBe(true);
-    expect(recordFiles("alpha")).toHaveLength(1);
-    expect(fs.existsSync(lockFile("alpha"))).toBe(false);
-  });
+    // There is no cached counter anywhere to be out of step with the records.
+    const stray = fs.readdirSync(dir)
+      .filter((name) => /count|quota|ledger|total/i.test(name));
+    expect(stray).toEqual([]);
 
-  it("a stale lock does not permanently consume project capacity", () => {
-    fs.mkdirSync(path.join(tmp, "alpha"), { recursive: true });
-    fs.writeFileSync(lockFile("alpha"), JSON.stringify({ pid: 1, nonce: "gone" }));
-    age(lockFile("alpha"));
-
-    for (let i = 0; i < 3; i += 1) {
-      const written = store.write("alpha", record({ runId: `run_${String(i)}` }));
-      expect(written.ok).toBe(true);
-    }
-    expect(recordFiles("alpha")).toHaveLength(3);
+    // The next writer recovers on its own, and the count includes the orphan.
+    const written = store.write("alpha", record());
+    expect(written.ok).toBe(true);
+    expect(recordFiles("alpha")).toHaveLength(2);
+    expect(store.list("alpha").count).toEqual({ kind: "exact", records: 2 });
   });
 
   it("a record published before the crash needs no reconciliation", () => {
@@ -450,7 +692,8 @@ describe("crash recovery", () => {
     const inFlight = path.join(dir, "20260908T120000000Z-bbbb.json.998.efgh.tmp");
     fs.writeFileSync(abandoned, "partial");
     fs.writeFileSync(inFlight, "partial");
-    age(abandoned);
+    const old = new Date(Date.now() - EXPERIENCE_STORAGE_LIMITS.temporaryAbandonMs - 5_000);
+    fs.utimesSync(abandoned, old, old);
 
     // Temporary files never occupied a slot; cleaning them reclaims disk only.
     expect(store.list("alpha").count).toEqual({ kind: "exact", records: 1 });
@@ -665,8 +908,10 @@ describe("the quota gate creates no new trust boundary", () => {
     expect(decision.ok).toBe(false);
     if (decision.ok) return;
     expect(decision.reason).toBe("failed");
-    // Released in a finally: a failed write must not wedge the project.
-    expect(fs.existsSync(path.join(dir, ProjectLock.fileName()))).toBe(false);
+    // Released in a finally: a failed write must not wedge the project, and
+    // the lock directory must be left with no owner at all.
+    const locks = path.join(dir, ProjectLock.directoryName());
+    expect(fs.existsSync(locks) ? fs.readdirSync(locks) : []).toEqual([]);
     expect(new ProjectQuota(dir).reserveAndPublish({
       fileName: recordName(1),
       isRecordName: (name) => RECORD_NAME.test(name),
