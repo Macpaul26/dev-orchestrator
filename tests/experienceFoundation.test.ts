@@ -398,7 +398,20 @@ describe("the live authority model is unchanged", () => {
 
 // ===========================================================================
 describe("the foundation is architecture only", () => {
-  it("is imported by NO production code", () => {
+  it("is imported ONLY by the experience store", () => {
+    /**
+     * UPDATED FOR TASK 009, DELIBERATELY.
+     *
+     * This guard previously asserted that NO production code imported the
+     * foundation - the marker that it was architecture only. Task 009 adds the
+     * first sanctioned consumer, the experience store, so the guard fired
+     * exactly as designed: as the signal that a deliberate task had begun.
+     *
+     * It is NARROWED rather than deleted. The list stays exact, so a second
+     * consumer - a retrieval layer, an evaluator, a workflow node quietly
+     * writing experience - cannot appear without someone editing this line and
+     * saying why.
+     */
     const root = path.resolve(__dirname, "..", "src");
     const importers: string[] = [];
     const walk = (dir: string): void => {
@@ -408,18 +421,29 @@ describe("the foundation is architecture only", () => {
         if (!entry.name.endsWith(".ts")) continue;
         if (full.endsWith(path.join("domain", "experience.ts"))) continue;
         if (fs.readFileSync(full, "utf8").includes("domain/experience.js")) {
-          importers.push(path.relative(root, full));
+          importers.push(path.relative(root, full).split(path.sep).join("/"));
         }
       }
     };
     walk(root);
-    expect(importers).toEqual([]);
+    // Only the store imports it by that specifier; experienceStorage.ts sits
+    // in the same directory and imports it relatively.
+    expect(importers.sort()).toEqual(["experience/experienceStore.ts"]);
   });
 
-  it("adds no store, retrieval, evaluator or learning implementation", () => {
+  it("adds no retrieval, evaluator or learning implementation", () => {
+    /**
+     * UPDATED FOR TASK 009, DELIBERATELY.
+     *
+     * `experienceStore.ts` is removed from this list because Task 009 IS the
+     * store, and it was approved as persistence only. Everything else stays
+     * forbidden: retrieval is Task 010, evaluation and confidence are Task 011,
+     * and a learning engine is later still. Each remains a separate, separately
+     * reviewed decision.
+     */
     const root = path.resolve(__dirname, "..", "src");
     const forbidden = [
-      "experienceStore.ts", "learningEngine.ts", "experienceRetrieval.ts",
+      "learningEngine.ts", "experienceRetrieval.ts",
       "lessonEvaluator.ts", "confidenceEngine.ts",
     ];
     const found: string[] = [];
