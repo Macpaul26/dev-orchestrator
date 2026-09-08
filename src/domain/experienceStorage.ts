@@ -35,8 +35,25 @@ export const EXPERIENCE_STORAGE_LIMITS = {
   maxListResults: 50,
   /** UTF-8 bytes one list call may return in total. */
   maxListBytes: 256 * 1024,
-  /** Entries a single directory scan will consider. */
+  /** Entries a single directory scan will read before it stops AND SAYS SO. */
   maxDirectoryEntries: 20_000,
+  /**
+   * How long a project write lock may go untouched before another process may
+   * break it.
+   *
+   * The critical section is a bounded directory scan plus one small file write
+   * - milliseconds. Thirty seconds is four orders of magnitude of headroom, so
+   * a lock this old almost certainly belongs to a process that died. "Almost
+   * certainly" is the honest word: see `ProjectLock` for what breaking a lock
+   * does and does not guarantee.
+   */
+  lockStaleMs: 30_000,
+  /** How long a writer waits for the project lock before reporting contention. */
+  lockAcquireTimeoutMs: 5_000,
+  /** Longest pause between lock attempts. */
+  lockPollMaxMs: 50,
+  /** Abandoned temporary files one write may clear up. Bounded on purpose. */
+  maxTemporaryCleanupsPerWrite: 64,
 } as const;
 
 /**
@@ -168,7 +185,28 @@ export const ExperienceWriteFailureCode = z.enum([
   "invalid_project_id",
   "invalid_record",
   "oversized",
+  /** The project is at `maxRecordsPerProject` and this record is a new one. */
   "project_quota_exceeded",
+  /**
+   * Another process holds the project write lock and did not release it within
+   * `lockAcquireTimeoutMs`.
+   *
+   * A CONTENTION OUTCOME, NOT A QUOTA OUTCOME. Nothing was written and nothing
+   * was consumed; the same write may simply be retried. It is a distinct code
+   * because "someone else is writing" and "this project is full" are different
+   * facts and a caller that cannot tell them apart will retry the wrong one.
+   */
+  "storage_busy",
+  /**
+   * The project's record count could not be established within
+   * `maxDirectoryEntries`, so the store cannot prove the write would stay
+   * under the ceiling.
+   *
+   * REFUSING IS THE POINT. The alternative is writing on the strength of a
+   * count taken from an arbitrary prefix of a directory, which is how a hard
+   * bound quietly becomes an advisory one.
+   */
+  "quota_indeterminate",
   "storage_failure",
 ]);
 export type ExperienceWriteFailureCode = z.infer<typeof ExperienceWriteFailureCode>;
@@ -181,11 +219,53 @@ export const ExperienceWriteFailure = z.object({
 export type ExperienceWriteFailure = z.infer<typeof ExperienceWriteFailure>;
 
 /**
+ * HOW MANY RECORDS A PROJECT HOLDS - OR AS MUCH AS COULD BE ESTABLISHED.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT A NUMBER
+ * ---------------------------------------------------------------------------
+ * Every directory scan in this store is bounded by `maxDirectoryEntries`, so
+ * there are two genuinely different results and they must not share a shape:
+ *
+ *   EXACT     the whole directory was read. `records` is the count, full stop.
+ *
+ *   BOUNDED   the scan stopped at the entry ceiling. `atLeast` is what was
+ *             seen before it stopped, and the true total may be larger.
+ *
+ * The original Task 009 listing reported a single `totalOnDisk` taken from the
+ * first `maxDirectoryEntries` names `readdir` happened to return, and presented
+ * it as the number of records on disk. That is a claim the implementation could
+ * not support: directory order is a property of the filesystem, so a valid
+ * record sitting past the cutoff was silently uncounted. Independent review
+ * found it, and the fix is not a bigger ceiling - it is a shape that CANNOT
+ * express "there are N records" when only a prefix was examined.
+ *
+ * `atLeast` is deliberately a different field name from `records`. A caller
+ * that reads the count without checking `kind` gets a type error rather than a
+ * plausible wrong number.
+ */
+export const ExperienceRecordCount = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("exact"),
+    records: z.number().int().nonnegative(),
+  }).strict(),
+  z.object({
+    kind: z.literal("bounded"),
+    atLeast: z.number().int().nonnegative(),
+  }).strict(),
+]);
+export type ExperienceRecordCount = z.infer<typeof ExperienceRecordCount>;
+
+/**
  * The result of listing a project's experience.
  *
- * `truncated` and `defects` exist so nothing is lost silently. A page that
- * quietly omitted the records it could not parse would look identical to a
+ * `truncated`, `defects` and `count` exist so nothing is lost silently. A page
+ * that quietly omitted the records it could not parse would look identical to a
  * project that simply had fewer of them.
+ *
+ * When `count.kind` is `bounded`, the ordering guarantee weakens with it: the
+ * page holds the newest of what was SCANNED, which need not be the newest in
+ * the project. `truncated` is always true in that case.
  */
 export const ExperienceListing = z.object({
   records: z.array(StoredExperience).max(EXPERIENCE_STORAGE_LIMITS.maxListResults),
@@ -193,8 +273,8 @@ export const ExperienceListing = z.object({
   defects: z.array(ExperienceDefect).max(EXPERIENCE_STORAGE_LIMITS.maxListResults),
   /** True when a bound stopped this listing returning more. */
   truncated: z.boolean().default(false),
-  /** Records present in the project, before bounds. Counted from filenames. */
-  totalOnDisk: z.number().int().nonnegative().default(0),
+  /** What could be established about the project's size. Never a bare number. */
+  count: ExperienceRecordCount,
   bytesReturned: z.number().int().nonnegative().default(0),
 }).strict();
 export type ExperienceListing = z.infer<typeof ExperienceListing>;

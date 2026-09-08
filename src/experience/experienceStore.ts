@@ -13,8 +13,10 @@ import {
   type ExperienceWriteFailure as TExperienceWriteFailure,
   type ExperienceDefect as TExperienceDefect,
   type ExperienceDefectCode,
+  type ExperienceRecordCount as TExperienceRecordCount,
 } from "../domain/experienceStorage.js";
 import { resolveWithin, orchestratorHome } from "../persistence/paths.js";
+import { ProjectQuota, scanDirectoryBounded } from "./projectQuota.js";
 
 /**
  * THE EXPERIENCE STORE
@@ -142,14 +144,30 @@ function parseFileName(name: string): { stamp: string; id: string } | null {
   return { stamp: match[1]!, id: match[2]! };
 }
 
+/** Suffix every in-flight write uses. Never matches the record name shape. */
+const TEMPORARY_SUFFIX = ".tmp";
+
+const isRecordName = (name: string): boolean => parseFileName(name) !== null;
+const isTemporaryName = (name: string): boolean => name.endsWith(TEMPORARY_SUFFIX);
+
 export type ExperienceWriteResult =
   | { ok: true; stored: TStoredExperience; id: string }
   | { ok: false; failure: TExperienceWriteFailure };
 
+/**
+ * `missing` and `indeterminate` are different answers and never share a shape.
+ *
+ * `missing` asserts absence: the whole project directory was examined and the
+ * record is not in it. `indeterminate` asserts nothing: the directory is larger
+ * than `maxDirectoryEntries`, the scan stopped, and the record may well exist
+ * past the cutoff. Collapsing the second into the first would be the store
+ * claiming to have looked everywhere when it had not.
+ */
 export type ExperienceReadResult =
   | { ok: true; stored: TStoredExperience }
   | { ok: false; defect: TExperienceDefect }
-  | { ok: false; missing: true };
+  | { ok: false; missing: true }
+  | { ok: false; indeterminate: true };
 
 export class ExperienceStore {
   /**
@@ -251,27 +269,53 @@ export class ExperienceStore {
         `${String(EXPERIENCE_STORAGE_LIMITS.maxRecordBytes)}-byte ceiling`);
     }
 
-    const file = path.join(dir, fileNameFor(record, id));
+    const fileName = fileNameFor(record, id);
+    const file = path.join(dir, fileName);
 
-    /**
-     * The quota is checked BEFORE writing, and only counts records that are
-     * not this one - persisting the same experience twice is an overwrite, not
-     * growth, so it must not be refused once a project is near its limit.
-     */
     try {
       fs.mkdirSync(dir, { recursive: true });
-      if (!fs.existsSync(file)) {
-        const existing = this.#countRecords(dir);
-        if (existing >= EXPERIENCE_STORAGE_LIMITS.maxRecordsPerProject) {
-          return fail("project_quota_exceeded",
-            `the project already holds ${String(existing)} records, at the ceiling of ` +
-            `${String(EXPERIENCE_STORAGE_LIMITS.maxRecordsPerProject)}`);
-        }
-      }
-      this.#writeAtomic(file, serialized);
     } catch {
       // The message names no path: a storage error should not leak the layout.
       return fail("storage_failure", "the record could not be written to storage");
+    }
+
+    /**
+     * THE QUOTA IS A HARD BOUND, AND THIS IS WHERE THAT IS MADE TRUE.
+     *
+     * The count, the "is this record new?" decision and the publish all happen
+     * inside one cross-process lock, so two writers cannot both see the last
+     * free slot. The store hands the gate a filename and two predicates and
+     * nothing else - it never sees the record - which is why the accounting
+     * cannot leak anything even in an error path.
+     *
+     * See ProjectQuota for why the count is derived from the records on every
+     * write rather than cached in a counter file.
+     */
+    const decision = new ProjectQuota(dir).reserveAndPublish({
+      fileName,
+      isRecordName,
+      isTemporaryName,
+      publish: () => { this.#writeAtomic(file, serialized); },
+      unpublish: () => { fs.rmSync(file, { force: true }); },
+    });
+
+    if (!decision.ok) {
+      switch (decision.reason) {
+        case "quota_exceeded":
+          return fail("project_quota_exceeded",
+            `the project holds ${String(decision.records)} records, at the ceiling of ` +
+            `${String(EXPERIENCE_STORAGE_LIMITS.maxRecordsPerProject)}`);
+        case "indeterminate":
+          return fail("quota_indeterminate",
+            "the project's record count could not be established within the " +
+            "directory scan bound, so the write cannot be proved to stay under " +
+            "the ceiling");
+        case "busy":
+          return fail("storage_busy",
+            "another writer holds this project's write lock; nothing was written");
+        default:
+          return fail("storage_failure", "the record could not be written to storage");
+      }
     }
 
     return { ok: true, stored, id };
@@ -280,18 +324,46 @@ export class ExperienceStore {
   /**
    * Write to a temporary file, flush it, then rename into place.
    *
-   * `rename` within a directory is atomic on both POSIX and Windows, so a
-   * reader sees either the previous complete record or the new complete one -
-   * never a half-serialized object that happens to parse. The `fsync` before
-   * the rename is what makes that true across a power loss rather than only
-   * across a crash.
+   * ---------------------------------------------------------------------------
+   * WHAT THIS ACTUALLY GUARANTEES
+   * ---------------------------------------------------------------------------
+   * ATOMIC VISIBILITY, on both POSIX and Windows: `rename` within a directory
+   * replaces the entry in one step, so a concurrent reader sees either the
+   * previous complete record or the new complete one - never a half-serialized
+   * object that happens to parse. This is the property the store relies on and
+   * the one it is entitled to claim.
+   *
+   * DURABILITY OF THE FILE'S CONTENTS, via `fsync` on the data before the
+   * rename. Without it the rename could be durable while the bytes it points at
+   * were not.
+   *
+   * ---------------------------------------------------------------------------
+   * WHAT IT DOES NOT GUARANTEE - CORRECTED AFTER REVIEW
+   * ---------------------------------------------------------------------------
+   * The first version of this comment said the `fsync` made the write survive
+   * "a power loss rather than only a crash". That was more than the code did.
+   * Flushing the file does not flush the DIRECTORY ENTRY that makes the new name
+   * visible, so on a POSIX filesystem a power cut just after the rename could
+   * leave the data on disk under no name at all.
+   *
+   * The directory flush below closes that on POSIX. On Windows it cannot: a
+   * directory cannot be opened for `fsync` this way, the call fails, and the
+   * failure is swallowed deliberately. So on Windows the durability of the
+   * rename itself is whatever the filesystem provides, and this code does not
+   * improve it and does not claim to.
+   *
+   * There is no claim here of guaranteed durability across all power-loss
+   * scenarios on every OS. Network filesystems, virtualised disks and drives
+   * that lie about their write caches all defeat it, and none of them is
+   * detectable from here.
    *
    * On failure the temporary file is removed and the previous record is left
    * untouched: a botched write must not destroy the valid record it was
    * replacing.
    */
   #writeAtomic(file: string, contents: string): void {
-    const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    const temporary =
+      `${file}.${String(process.pid)}.${crypto.randomUUID()}${TEMPORARY_SUFFIX}`;
     let handle: number | null = null;
     try {
       handle = fs.openSync(temporary, "wx", 0o600);
@@ -305,15 +377,18 @@ export class ExperienceStore {
       try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
       throw error;
     }
-  }
 
-  /** Count stored records without opening any of them. */
-  #countRecords(dir: string): number {
-    if (!fs.existsSync(dir)) return 0;
-    return fs.readdirSync(dir)
-      .slice(0, EXPERIENCE_STORAGE_LIMITS.maxDirectoryEntries)
-      .filter((name) => parseFileName(name) !== null)
-      .length;
+    // Best effort, and only meaningful where the platform supports it. A
+    // failure here means the rename is no less durable than the filesystem
+    // makes it - not that the record was lost, which is why it does not fail
+    // the write.
+    let directory: number | null = null;
+    try {
+      directory = fs.openSync(path.dirname(file), "r");
+      fs.fsyncSync(directory);
+    } catch { /* Windows, and some filesystems, cannot flush a directory */ } finally {
+      if (directory !== null) { try { fs.closeSync(directory); } catch { /* closing */ } }
+    }
   }
 
   /**
@@ -322,6 +397,14 @@ export class ExperienceStore {
    * Returns a defect rather than a record when the file is unparseable, fails
    * the schema, fails its digest, or disagrees with its own filename. Corrupt
    * history must never be handed back as though it were experience.
+   *
+   * The filename carries the record's timestamp as well as its id, so finding a
+   * record by id alone means scanning. The scan is bounded, which means absence
+   * cannot always be established: when the bound stops the scan before the
+   * record is found, the answer is `indeterminate`, not `missing`. Reporting
+   * "not there" after looking at part of a directory would be a claim the store
+   * has not earned. No lock is taken - `rename` gives readers a consistent view
+   * without one, and serialising reads behind writes would buy nothing.
    */
   read(projectId: string, id: string): ExperienceReadResult {
     const dir = this.#projectDir(projectId);
@@ -329,12 +412,21 @@ export class ExperienceStore {
       return { ok: false, defect: defect(id, "identity_mismatch",
         "the project id or experience id is not a valid identifier") };
     }
-    if (!fs.existsSync(dir)) return { ok: false, missing: true };
 
-    const match = fs.readdirSync(dir)
-      .slice(0, EXPERIENCE_STORAGE_LIMITS.maxDirectoryEntries)
-      .find((name) => parseFileName(name)?.id === id);
-    if (!match) return { ok: false, missing: true };
+    let scan;
+    try {
+      scan = scanDirectoryBounded(dir);
+    } catch {
+      return { ok: false, defect: defect(id, "unreadable",
+        "the project's history could not be read") };
+    }
+
+    const match = scan.names.find((name) => parseFileName(name)?.id === id);
+    if (!match) {
+      return scan.complete
+        ? { ok: false, missing: true }
+        : { ok: false, indeterminate: true };
+    }
 
     const loaded = this.#load(dir, match, projectId);
     if ("defect" in loaded) return { ok: false, defect: loaded.defect };
@@ -361,14 +453,31 @@ export class ExperienceStore {
    * Only the records on the returned page are opened. A project with a hundred
    * thousand records costs one directory read and at most `maxListResults`
    * file reads - never a parse of the whole corpus followed by a slice.
+   *
+   * ---------------------------------------------------------------------------
+   * THE COUNT SAYS WHAT IT KNOWS
+   * ---------------------------------------------------------------------------
+   * The directory scan stops at `maxDirectoryEntries`. When it does, the page
+   * holds the newest of what was SCANNED rather than the newest in the project,
+   * and `count` comes back as `bounded` with a lower bound instead of an exact
+   * total. See `ExperienceRecordCount` for why that is a different shape rather
+   * than a smaller number.
    */
   list(projectId: string, options: { limit?: number } = {}): TExperienceListing {
-    const empty = ExperienceListing.parse({ records: [], defects: [] });
+    const empty = ExperienceListing.parse({
+      records: [], defects: [], count: { kind: "exact", records: 0 },
+    });
     const dir = this.#projectDir(projectId);
-    if (!dir || !fs.existsSync(dir)) return empty;
+    if (!dir) return empty;
 
-    const entries = fs.readdirSync(dir)
-      .slice(0, EXPERIENCE_STORAGE_LIMITS.maxDirectoryEntries)
+    let scan;
+    try {
+      scan = scanDirectoryBounded(dir);
+    } catch {
+      return empty;
+    }
+
+    const entries = scan.names
       .map((name) => ({ name, parsed: parseFileName(name) }))
       .filter((e): e is { name: string; parsed: { stamp: string; id: string } } =>
         e.parsed !== null);
@@ -387,7 +496,9 @@ export class ExperienceStore {
     const records: TStoredExperience[] = [];
     const defects: TExperienceDefect[] = [];
     let bytesReturned = 0;
-    let truncated = entries.length > limit;
+    // An incomplete scan is itself a bound that stopped this listing returning
+    // more, so it counts as truncation even when the page is not full.
+    let truncated = entries.length > limit || !scan.complete;
 
     for (const entry of entries) {
       if (records.length >= limit) break;
@@ -409,11 +520,11 @@ export class ExperienceStore {
       bytesReturned += size;
     }
 
-    return ExperienceListing.parse({
-      records, defects, truncated,
-      totalOnDisk: entries.length,
-      bytesReturned,
-    });
+    const count: TExperienceRecordCount = scan.complete
+      ? { kind: "exact", records: entries.length }
+      : { kind: "bounded", atLeast: entries.length };
+
+    return ExperienceListing.parse({ records, defects, truncated, count, bytesReturned });
   }
 
   /**

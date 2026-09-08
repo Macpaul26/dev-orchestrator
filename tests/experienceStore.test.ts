@@ -82,7 +82,7 @@ describe("writing and reading", () => {
     const listing = store.list("alpha");
     expect(listing.records).toEqual([]);
     expect(listing.defects).toEqual([]);
-    expect(listing.totalOnDisk).toBe(0);
+    expect(listing.count).toEqual({ kind: "exact", records: 0 });
   });
 });
 
@@ -391,7 +391,10 @@ describe("bounds", () => {
     const listing = store.list("alpha");
     expect(listing.records).toHaveLength(EXPERIENCE_STORAGE_LIMITS.maxListResults);
     expect(listing.truncated).toBe(true);
-    expect(listing.totalOnDisk).toBe(EXPERIENCE_STORAGE_LIMITS.maxListResults + 15);
+    // The whole directory was scanned, so the count is exact and says so.
+    expect(listing.count).toEqual({
+      kind: "exact", records: EXPERIENCE_STORAGE_LIMITS.maxListResults + 15,
+    });
   });
 
   it("honours a smaller caller limit but never a larger one", () => {
@@ -611,7 +614,7 @@ describe("corruption handling", () => {
 
     const listing = store.list("alpha");
     expect(listing.records).toHaveLength(1);
-    expect(listing.totalOnDisk).toBe(1);
+    expect(listing.count).toEqual({ kind: "exact", records: 1 });
   });
 });
 
@@ -764,14 +767,21 @@ describe("architecture boundaries", () => {
   });
 
   it("does not depend on capability, grant or approval", () => {
-    const source = fs.readFileSync(
-      path.resolve(__dirname, "..", "src", "experience", "experienceStore.ts"), "utf8",
-    );
-    for (const forbidden of [
-      "domain/capability.js", "domain/grant.js", "domain/approval.js",
-      "grantAuthority", "issueGrant", "child_process", "fetch(",
-    ]) {
-      expect(source, `experience must not reach ${forbidden}`).not.toContain(forbidden);
+    // EVERY file in src/experience, not just the store: the Task 009 correction
+    // added one, and a guard that names a single file stops guarding the layer
+    // the moment the layer grows.
+    const dir = path.resolve(__dirname, "..", "src", "experience");
+    const sources = fs.readdirSync(dir).filter((name) => name.endsWith(".ts"));
+    expect(sources.sort()).toEqual(["experienceStore.ts", "projectQuota.ts"]);
+
+    for (const name of sources) {
+      const source = fs.readFileSync(path.join(dir, name), "utf8");
+      for (const forbidden of [
+        "domain/capability.js", "domain/grant.js", "domain/approval.js",
+        "grantAuthority", "issueGrant", "child_process", "fetch(",
+      ]) {
+        expect(source, `${name} must not reach ${forbidden}`).not.toContain(forbidden);
+      }
     }
   });
 
