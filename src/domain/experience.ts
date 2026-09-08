@@ -6,34 +6,43 @@ import { z } from "zod";
  * ---------------------------------------------------------------------------
  * NOTHING HERE LEARNS ANYTHING YET
  * ---------------------------------------------------------------------------
- * There is no experience store, no retrieval, no confidence engine, and nothing
- * in the workflow writes an `ExperienceRecord`. This module exists so that the
- * shape of the eventual learning subsystem is decided NOW, while the security
- * boundaries are being built and while adding a field is cheap - rather than
- * later, when a learning engine already exists and the awkward questions are
- * expensive to answer.
- *
- * `docs/PHASE-008-LEARNING.md` describes the intended progression. Tasks 009+
- * implement it. A test asserts that no production code imports this module, so
- * "architecture only" stays true until someone deliberately changes it.
+ * There is no experience store, no retrieval, no confidence evaluator, and
+ * nothing in the workflow writes a record. This module fixes the SHAPE while
+ * that is still cheap; `docs/PHASE-008-LEARNING.md` describes the progression
+ * and Tasks 009+ implement it. A test asserts no production code imports this
+ * module, so "architecture only" stays true until someone changes it
+ * deliberately.
  *
  * ---------------------------------------------------------------------------
- * THE INVARIANT THIS FILE EXISTS TO PROTECT
+ * THE INVARIANT THIS FILE PROTECTS
  * ---------------------------------------------------------------------------
  *
  *     LEARNING  ->  REASONING
  *     LEARNING  -/->  AUTHORITY
  *
- * A lesson drawn from a hundred successful runs is still, at the moment it
- * reaches a decision, a piece of TEXT that arrived from storage. It can inform
- * a proposal. It cannot approve one, grant a capability, widen a scope, lower a
- * risk classification, or disable a check.
+ * A lesson drawn from a hundred verified runs is still, at the moment it
+ * reaches a decision, TEXT THAT ARRIVED FROM STORAGE. It can inform a proposal.
+ * It cannot approve one, grant a capability, widen a scope, lower a risk
+ * classification, or disable a check.
  *
- * That is enforced the same way the reasoning boundary is enforced: the schema
- * declares no field that could carry authority, `.strict()` refuses any that
- * shows up, and `FORBIDDEN_EXPERIENCE_KEYS` is asserted against the parsed
- * shape. An experience record has nowhere to put a grant even if something
- * upstream tried to give it one.
+ * ---------------------------------------------------------------------------
+ * WHAT THE FIRST VERSION OF THIS FILE GOT WRONG
+ * ---------------------------------------------------------------------------
+ * Two claims in the original foundation were false, and the review caught both:
+ *
+ *   1. "Cross-project leakage is prevented because there is no content field."
+ *      Wrong. `planSummary`, `failures`, `successfulPatterns` and the rest are
+ *      free text, and free text IS content - it can carry a diff, a prompt, a
+ *      model response or a secret just as effectively as a field named
+ *      `content` would. Absence of that NAME prevented nothing.
+ *
+ *   2. "Confidence is derived, never invented." Also wrong, because
+ *      `confidence` and `independentlyVerified` were writable fields. A caller
+ *      could store `sources: ["AGENT_CLAIM"]` alongside
+ *      `confidence: "very_high", independentlyVerified: true` and the schema
+ *      would accept it.
+ *
+ * Both are corrected structurally below rather than by documentation.
  */
 
 /** Hard ceilings. Not configurable - editing this file is the only way past. */
@@ -45,15 +54,14 @@ export const EXPERIENCE_LIMITS = {
   maxCorrections: 20,
   maxEvidenceRefs: 50,
   maxTaskTypeLength: 100,
+  /** A portable lesson is short by construction. See `PortableLesson`. */
+  maxLessonStatementLength: 300,
 } as const;
 
 const Item = z.string().min(1).max(EXPERIENCE_LIMITS.maxItemLength);
 
 /**
  * WHERE A STATEMENT ABOUT AN OUTCOME CAME FROM.
- *
- * The ladder this system already implements, named so experience can record
- * which rung a claim actually reached:
  *
  *   AGENT_CLAIM            the agent said so. Evidence of nothing.
  *   PROCESS_OBSERVATION    the OS reported an exit code. A fact about a
@@ -62,10 +70,6 @@ const Item = z.string().min(1).max(EXPERIENCE_LIMITS.maxItemLength);
  *   VERIFICATION_RESULT    a configured check actually ran and returned.
  *   REVIEW_FINDING         the deterministic review layer produced it.
  *   HUMAN_DECISION         a person decided. The only source that authorises.
- *
- * They are ordered, and the order matters: an outcome supported only by
- * `AGENT_CLAIM` must never be stored as though it were supported by
- * `VERIFICATION_RESULT`.
  */
 export const OutcomeSource = z.enum([
   "AGENT_CLAIM",
@@ -77,128 +81,154 @@ export const OutcomeSource = z.enum([
 ]);
 export type OutcomeSource = z.infer<typeof OutcomeSource>;
 
-/** Sources that establish something independently of what the agent said. */
+/**
+ * Sources that establish something independently of what the agent said.
+ *
+ * `PROCESS_OBSERVATION` is deliberately excluded: an exit code says a program
+ * finished, not that a repository is in the intended state.
+ */
 export const INDEPENDENT_SOURCES: readonly OutcomeSource[] = [
   "REPOSITORY_OBSERVATION", "VERIFICATION_RESULT", "REVIEW_FINDING", "HUMAN_DECISION",
 ] as const;
 
 /**
- * EVIDENCE QUALITY, DERIVED FROM EVIDENCE - NEVER INVENTED.
+ * EVIDENCE QUALITY - VOCABULARY ONLY.
  *
- * Deliberately a small ordinal set rather than a number. A float would invite a
- * scoring formula, and a scoring formula invented without data is a way of
- * dressing a guess up as a measurement. These four levels say only which KINDS
- * of evidence exist, which is a fact rather than an estimate.
+ * Four ordinal levels rather than a float: a number invites a scoring formula,
+ * and a formula invented without data dresses a guess up as a measurement.
  *
  *   low        an agent said so, and nothing corroborates it
  *   medium     the OS and/or the repository corroborate it
  *   high       a check ran, or a human reviewed it
- *   very_high  independently repeated across separate runs or projects
+ *   very_high  independently repeated - see the warning below
+ *
+ * `very_high` IS NOT REACHABLE from this module. Recurrence has to be counted
+ * from real, attributable records, and no store exists to count them in. Task
+ * 011 owns the authoritative derivation; anything here that claimed to produce
+ * `very_high` would be asserting a fact nobody had established.
  */
 export const EvidenceConfidence = z.enum(["low", "medium", "high", "very_high"]);
 export type EvidenceConfidence = z.infer<typeof EvidenceConfidence>;
 
 /**
- * Confidence from the sources actually present.
+ * A PROVISIONAL reading of evidence quality. NOT a security boundary.
  *
- * `very_high` additionally requires repetition, which is a COUNT the caller
- * must supply from real records rather than something this function can
- * conjure. Passing a count nobody counted would be inventing data, so the
- * default is 1 - this run, once.
+ * ---------------------------------------------------------------------------
+ * WHAT THIS IS AND IS NOT
+ * ---------------------------------------------------------------------------
+ * It is a pure function of the sources present, useful for reasoning about the
+ * vocabulary and for tests. It is NOT authoritative, is not persisted, and no
+ * decision may rest on it.
+ *
+ * The previous version took an `independentConfirmations` integer from the
+ * caller, which let `confidenceFrom(["VERIFICATION_RESULT"], 3)` claim
+ * recurrence that nobody had demonstrated - a caller-asserted trust value
+ * wearing the costume of a derivation. The parameter is gone.
+ *
+ * It therefore tops out at `high`. Reaching `very_high` requires counting
+ * independent confirmations across attributable records, which is Task 011's
+ * job and needs a store that does not exist.
  */
-export function confidenceFrom(
+export function provisionalConfidence(
   sources: readonly OutcomeSource[],
-  independentConfirmations = 1,
-): EvidenceConfidence {
+): Exclude<EvidenceConfidence, "very_high"> {
   const has = (source: OutcomeSource): boolean => sources.includes(source);
-  const reviewed = has("VERIFICATION_RESULT") || has("REVIEW_FINDING") || has("HUMAN_DECISION");
-  const observed = has("REPOSITORY_OBSERVATION") || has("PROCESS_OBSERVATION");
-
-  if (reviewed && independentConfirmations >= 3) return "very_high";
-  if (reviewed) return "high";
-  if (observed) return "medium";
+  if (has("VERIFICATION_RESULT") || has("REVIEW_FINDING") || has("HUMAN_DECISION")) {
+    return "high";
+  }
+  if (has("REPOSITORY_OBSERVATION") || has("PROCESS_OBSERVATION")) return "medium";
   return "low";
+}
+
+/** True only when something other than the agent corroborated the outcome. */
+export function isIndependentlyVerified(sources: readonly OutcomeSource[]): boolean {
+  return sources.some((source) => INDEPENDENT_SOURCES.includes(source));
 }
 
 /**
  * How settled a lesson is.
  *
- * A single failure must not become a permanent rule, and a single success must
- * not become a policy. These states exist so a lesson can be held without being
- * believed, and retired without being deleted.
+ * These states let a lesson be HELD WITHOUT BEING BELIEVED, and RETIRED WITHOUT
+ * BEING DELETED. A single failure must not become a permanent rule; a single
+ * success must not become policy.
  */
 export const LessonStatus = z.enum([
-  /** Observed once. Not yet reusable guidance. */
-  "candidate",
-  /** Repeatedly observed with independent evidence. */
-  "supported",
-  /** Evidence exists on both sides; recorded, not applied. */
-  "uncertain",
-  /** Later evidence contradicts it. */
-  "contradicted",
-  /** Was supported, no longer applies. Kept, so it is not silently relearned. */
-  "deprecated",
+  "candidate", "supported", "uncertain", "contradicted", "deprecated",
 ]);
 export type LessonStatus = z.infer<typeof LessonStatus>;
 
-/**
- * The three memory layers the eventual system is aimed at.
- *
- * Named now because they have different retention, different privacy exposure
- * and different retrieval rules, and conflating them later would be expensive.
- */
-export const MemoryLayer = z.enum([
-  /** What happened in one run. Project-scoped, the most sensitive. */
-  "episodic",
-  /** What repeats across runs. Generalised, and the only layer that could ever
-   *  reasonably cross a project boundary - and then only sanitised. */
-  "semantic",
-  /** Which sequences of steps have worked for a class of task. */
-  "procedural",
-]);
+export const MemoryLayer = z.enum(["episodic", "semantic", "procedural"]);
 export type MemoryLayer = z.infer<typeof MemoryLayer>;
 
 /**
  * A reference to evidence that already exists elsewhere.
  *
- * A POINTER, not a copy. Experience must not become a second store of
- * repository contents, diffs, or check output: those are bounded and governed
- * where they live, and duplicating them here would create an unbounded archive
- * with a different lifetime and weaker rules. There is deliberately no `content`
- * field to put them in.
+ * A POINTER, not a copy. The `ref` is constrained to an identifier shape so it
+ * cannot become a smuggling channel for the payload it points at - a free
+ * string here would have reintroduced exactly the problem this correction
+ * exists to fix.
  */
 export const EvidenceRef = z.object({
   source: OutcomeSource,
-  /** Run, check id, or approval id - an identifier, never a payload. */
-  ref: z.string().min(1).max(200),
+  /**
+   * An identifier: run id, check id, approval id, commit sha.
+   *
+   * Restricted to identifier characters and 120 bytes. No spaces, no newlines,
+   * no punctuation that prose needs - so a diff or a sentence cannot be parked
+   * here under the guise of a reference.
+   */
+  ref: z.string().min(1).max(120).regex(
+    /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/,
+    "an evidence ref is an identifier, not free text",
+  ),
 }).strict();
 export type EvidenceRef = z.infer<typeof EvidenceRef>;
 
 /**
- * ONE COMPLETED RUN, AS EXPERIENCE.
+ * ONE COMPLETED RUN - PROJECT-SCOPED, AND NOT SAFE TO SHARE.
  *
- * Bounded, provenance-aware, and carrying no authority. Every field is either a
- * short human-readable statement or a reference to evidence held elsewhere.
+ * ---------------------------------------------------------------------------
+ * THIS RECORD CONTAINS CONTENT. SAY SO PLAINLY.
+ * ---------------------------------------------------------------------------
+ * The summary and pattern fields below are FREE TEXT written from a real run.
+ * They can contain repository content, diff fragments, error messages carrying
+ * paths, model output, or a secret somebody pasted into a source file. Nothing
+ * in this schema can tell the difference between a useful lesson and a leaked
+ * credential, because both are strings.
  *
- * NOT PRESENT, ON PURPOSE: file contents, diffs, prompts, model responses,
- * environment values, credentials, grants, capabilities, approvals, or a risk
- * level. Several of those would be genuinely useful for learning, and each is
- * either a secret, an authority, or an unbounded payload - so the record
- * references them instead of holding them.
+ * So the type says what is true: `scope` is the literal `"project"`, and there
+ * is no other value. An episodic record is confined to the project that
+ * produced it, and no amount of later code can mark one as shareable, because
+ * the field cannot hold another value.
+ *
+ * Cross-project material is a DIFFERENT TYPE - `PortableLesson` - which is
+ * structurally incapable of carrying free text, and which cannot yet be marked
+ * eligible at all.
+ *
+ * NOT PRESENT, ON PURPOSE: `confidence` and `independentlyVerified`. Both are
+ * derived from `sources` by `provisionalConfidence` and
+ * `isIndependentlyVerified`, and storing them would let a record assert a trust
+ * level its own evidence contradicts. `.strict()` rejects them.
  */
-export const ExperienceRecord = z.object({
+export const EpisodicExperience = z.object({
+  /**
+   * PROJECT-SCOPED, IMMUTABLY.
+   *
+   * The single permitted value. Not a default that later code can override -
+   * a literal, so "this became shareable somehow" is unrepresentable.
+   */
+  scope: z.literal("project"),
+  layer: z.literal("episodic"),
+
   projectId: z.string().min(1).max(200),
   runId: z.string().min(1).max(200),
-
-  /** A coarse label for retrieval, e.g. "add-endpoint". Not a free-form prompt. */
   taskType: z.string().min(1).max(EXPERIENCE_LIMITS.maxTaskTypeLength),
 
-  /** What was planned, what happened, and how it was judged - as summaries. */
+  /** FREE TEXT from a real run. Treat as project-confidential. */
   planSummary: z.string().max(EXPERIENCE_LIMITS.maxSummaryLength).default(""),
   implementationOutcome: z.string().max(EXPERIENCE_LIMITS.maxSummaryLength).default(""),
   verificationOutcome: z.string().max(EXPERIENCE_LIMITS.maxSummaryLength).default(""),
   reviewOutcome: z.string().max(EXPERIENCE_LIMITS.maxSummaryLength).default(""),
-
   failures: z.array(Item).max(EXPERIENCE_LIMITS.maxFailures).default([]),
   corrections: z.array(Item).max(EXPERIENCE_LIMITS.maxCorrections).default([]),
   successfulPatterns: z.array(Item).max(EXPERIENCE_LIMITS.maxPatterns).default([]),
@@ -208,49 +238,123 @@ export const ExperienceRecord = z.object({
   evidence: z.array(EvidenceRef).max(EXPERIENCE_LIMITS.maxEvidenceRefs).default([]),
 
   /**
-   * Which sources actually supported this record.
+   * Which sources supported this record. THE ONLY TRUST INPUT.
    *
-   * The honest answer to "how do we know?". An outcome resting on
-   * `AGENT_CLAIM` alone is stored as exactly that.
+   * Confidence and independent-verification are read from this, never stored
+   * beside it, so they cannot disagree with it.
    */
   sources: z.array(OutcomeSource).max(10).default([]),
-  confidence: EvidenceConfidence.default("low"),
-  /** Whether anything independent confirmed the agent's account. */
-  independentlyVerified: z.boolean().default(false),
 
-  layer: MemoryLayer.default("episodic"),
   status: LessonStatus.default("candidate"),
+  createdAt: z.string().datetime(),
+}).strict();
+export type EpisodicExperience = z.infer<typeof EpisodicExperience>;
+
+/**
+ * A LESSON THAT COULD EVENTUALLY CROSS A PROJECT BOUNDARY.
+ *
+ * ---------------------------------------------------------------------------
+ * STRUCTURALLY INCAPABLE OF CARRYING A PAYLOAD
+ * ---------------------------------------------------------------------------
+ * The whole point of a separate type. A portable lesson has no summary, no
+ * failure list, no pattern list, and no evidence text - only a short statement
+ * under a character allowlist, a task-type label, and counts.
+ *
+ * The allowlist is the load-bearing part: letters, digits, spaces and a little
+ * sentence punctuation. No slashes, no dots-in-sequence, no backticks, no
+ * newlines, no braces, no equals. A file path, a diff hunk, a JSON blob, a
+ * base64 token and an `API_KEY=...` assignment are all unrepresentable rather
+ * than merely discouraged.
+ *
+ * It is a genuine restriction, not a filter - a determined caller could still
+ * write a secret in plain words, which is why eligibility is ALSO gated below.
+ *
+ * ---------------------------------------------------------------------------
+ * AND IT CANNOT BE MARKED ELIGIBLE YET
+ * ---------------------------------------------------------------------------
+ * `crossProjectEligible` is the literal `false`. There is no value that means
+ * "yes", so no code written before the sanitisation design exists can promote a
+ * lesson across a project boundary - not by mistake, and not on purpose.
+ *
+ * Task 010 owns that design and will have to change this line to enable it,
+ * which is a visible, reviewable act.
+ */
+export const PortableLesson = z.object({
+  layer: z.enum(["semantic", "procedural"]),
+
+  /** A coarse retrieval label, not a description of any particular project. */
+  taskType: z.string().min(1).max(EXPERIENCE_LIMITS.maxTaskTypeLength)
+    .regex(/^[a-z0-9][a-z0-9-]*$/, "a task type is a kebab-case label"),
+
+  /**
+   * The lesson, in plain words.
+   *
+   * Short and character-restricted so it cannot carry a path, a diff, a token
+   * or a key-value assignment. See the note above on what this does and does
+   * not guarantee.
+   */
+  statement: z.string().min(1).max(EXPERIENCE_LIMITS.maxLessonStatementLength)
+    .regex(/^[A-Za-z0-9 ,.;:'()-]+$/,
+      "a portable lesson is plain prose: no paths, code, tokens or assignments"),
+
+  /** How many attributable records support it. Set by a future evaluator. */
+  supportingRecords: z.number().int().nonnegative().max(10_000).default(0),
+  contradictingRecords: z.number().int().nonnegative().max(10_000).default(0),
+
+  status: LessonStatus.default("candidate"),
+
+  /**
+   * ALWAYS FALSE, TODAY.
+   *
+   * Cross-project use requires a sanitisation and eligibility design that does
+   * not exist. A literal rather than a default, so it cannot be flipped by a
+   * caller, a migration, or a hand-edited record.
+   */
+  crossProjectEligible: z.literal(false),
 
   createdAt: z.string().datetime(),
 }).strict();
-export type ExperienceRecord = z.infer<typeof ExperienceRecord>;
+export type PortableLesson = z.infer<typeof PortableLesson>;
 
 /**
- * Field names that would mean authority if this schema ever accepted them.
+ * Field names that would mean authority, or a content payload, if this schema
+ * ever accepted them.
  *
- * Exported so a test can assert they are absent from the parsed shape - the
- * same guard `FORBIDDEN_PROPOSAL_KEYS` provides for model output. Adding one of
- * these later becomes a visible, reviewable act rather than an accident.
+ * Asserted against the parsed shape by a test, so adding one becomes a visible,
+ * reviewable act rather than an accident.
  */
 export const FORBIDDEN_EXPERIENCE_KEYS: readonly string[] = [
+  // Authority.
   "approved", "approve", "capabilities", "capability", "grant", "grants",
   "execute", "command", "shell", "tool", "tools", "risk", "highestRisk",
   "allowedScope", "scope", "authorized", "authorised", "bypass", "policy",
+  // Payload.
   "credentials", "token", "secret", "content", "diff", "prompt", "response",
+  "env", "environment", "stdout", "stderr", "transcript",
+  // Derived trust that must never be stored beside its own evidence.
+  "confidence", "independentlyVerified",
 ] as const;
 
 /**
  * The provenance experience will carry when it eventually reaches reasoning.
  *
- * DECLARED HERE, NOT YET ADDED to `ContextProvenance` - because nothing
- * produces experience yet, and a provenance class in the live authority table
- * that no record ever uses is a claim the system does not honour. Task 009 adds
- * it deliberately, with the rank below.
- *
- * The intended rank sits BELOW every human and orchestrator-observed source and
- * ABOVE a bare agent claim: a verified lesson is worth more than one agent's
- * say-so, and less than what a human decided or what the repository shows right
- * now. A test asserts it is not yet present in the live table.
+ * DECLARED, NOT LIVE. `ContextProvenance` has not gained this class, because
+ * nothing produces experience and a provenance nothing uses is a claim the
+ * system does not honour. The intended rank sits above a bare agent claim and
+ * below everything a human decided or the orchestrator observed itself.
  */
 export const INTENDED_EXPERIENCE_PROVENANCE = "HISTORICAL_EXPERIENCE" as const;
 export const INTENDED_EXPERIENCE_RANK = 20 as const;
+
+/**
+ * Thresholds that are DESIGN ASSUMPTIONS, not validated facts.
+ *
+ * Recorded here so a future task cannot quietly treat them as established. No
+ * experience dataset exists, so nobody knows whether three confirmations is
+ * sufficient evidence for anything. Task 011 must validate or replace these
+ * against real data - and may not mark them settled merely because tests pass.
+ */
+export const PROVISIONAL_THRESHOLDS = {
+  /** UNVALIDATED. A placeholder for Task 011 to justify or discard. */
+  confirmationsForVeryHigh: 3,
+} as const;

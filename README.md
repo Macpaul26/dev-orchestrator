@@ -45,7 +45,14 @@ confidence engine.
 The invariant it exists to protect: **learning informs reasoning, and never
 becomes authority.** A lesson from a hundred verified runs is still text from
 storage - it cannot approve a plan, grant a capability, widen a scope or
-disable a check. See [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md).
+disable a check.
+
+Project-scoped experience is typed as exactly that and is NOT safe to share;
+cross-project material is a separate type that cannot carry paths, diffs or
+tokens, and cannot yet be marked eligible to cross a boundary at all. Confidence
+is read from evidence rather than stored beside it. See
+[docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md), which states plainly
+what is guaranteed today and what is deferred.
 
 **Task 008 is implemented: controlled repository evidence.**
 

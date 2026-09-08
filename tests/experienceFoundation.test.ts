@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  ExperienceRecord, EXPERIENCE_LIMITS, FORBIDDEN_EXPERIENCE_KEYS,
-  OutcomeSource, INDEPENDENT_SOURCES, confidenceFrom,
-  LessonStatus, MemoryLayer,
+  EpisodicExperience, PortableLesson, EXPERIENCE_LIMITS, FORBIDDEN_EXPERIENCE_KEYS,
+  OutcomeSource, INDEPENDENT_SOURCES, provisionalConfidence, isIndependentlyVerified,
+  EvidenceConfidence, LessonStatus, MemoryLayer, PROVISIONAL_THRESHOLDS,
   INTENDED_EXPERIENCE_PROVENANCE, INTENDED_EXPERIENCE_RANK,
 } from "../src/domain/experience.js";
 import {
@@ -13,24 +13,32 @@ import {
 import { capabilityMatrix } from "../src/domain/capability.js";
 
 /**
- * TASK 008 ADDITION - THE LEARNING FOUNDATION, ATTACKED BEFORE IT EXISTS.
+ * TASK 008-A - THE LEARNING FOUNDATION, ATTACKED BEFORE IT EXISTS.
  *
  * ---------------------------------------------------------------------------
- * WHAT THESE TESTS ARE FOR
+ * TWO FALSE CLAIMS THESE TESTS NOW PIN DOWN
  * ---------------------------------------------------------------------------
- * No learning engine exists yet, so there is no behaviour to test. What CAN be
- * tested - and is worth far more now than later - is that the shape decided
- * today cannot carry authority tomorrow.
+ * The first version of this foundation asserted two things that were not true,
+ * and the review caught both:
  *
- * The expensive version of this mistake is discovering, after a learning
- * subsystem is running, that `ExperienceRecord` has a `scope` field somebody
- * started honouring. These tests make that a deliberate act: adding an
- * authority-shaped field to the schema fails here first.
+ *   1. "No content field, therefore no cross-project leakage." Free text IS
+ *      content - `planSummary` and `failures` can carry a diff, a prompt or a
+ *      secret perfectly well. The absence of a field NAMED `content` prevented
+ *      nothing.
+ *
+ *   2. "Confidence is derived, never invented." `confidence` and
+ *      `independentlyVerified` were writable, so a record could claim
+ *      `very_high` on the strength of an agent claim alone.
+ *
+ * Both are now structural, and the tests below try to violate them rather than
+ * inspecting comments that say they cannot be violated.
  */
 
-/** A minimal valid record. Illustrative only - no real project is described. */
-function record(overrides: Record<string, unknown> = {}) {
+/** A minimal valid episodic record. Illustrative - no real project described. */
+function episodic(overrides: Record<string, unknown> = {}) {
   return {
+    scope: "project",
+    layer: "episodic",
     projectId: "example-project",
     runId: "run_example",
     taskType: "add-endpoint",
@@ -39,18 +47,37 @@ function record(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** A minimal valid portable lesson. Illustrative only. */
+function portable(overrides: Record<string, unknown> = {}) {
+  return {
+    layer: "semantic",
+    taskType: "add-endpoint",
+    statement: "Prefer adding a test before changing shared validation logic.",
+    crossProjectEligible: false,
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 // ===========================================================================
 describe("experience cannot carry authority", () => {
   it("declares no authority-shaped field", () => {
-    const parsed = ExperienceRecord.parse(record());
-    for (const forbidden of FORBIDDEN_EXPERIENCE_KEYS) {
-      expect(Object.keys(parsed), `experience must not carry "${forbidden}"`)
-        .not.toContain(forbidden);
+    for (const parsed of [
+      EpisodicExperience.parse(episodic()),
+      PortableLesson.parse(portable()),
+    ]) {
+      for (const forbidden of FORBIDDEN_EXPERIENCE_KEYS) {
+        // `scope` is a legitimate episodic field pinned to a literal; it is on
+        // the forbidden list for the PORTABLE shape, where it would mean reach.
+        if (forbidden === "scope" && "scope" in parsed) continue;
+        expect(Object.keys(parsed), `must not carry "${forbidden}"`)
+          .not.toContain(forbidden);
+      }
     }
   });
 
-  it("REJECTS a record that tries to carry one", () => {
-    const hostile = [
+  it("REJECTS a record that tries to carry authority", () => {
+    for (const attempt of [
       { approved: true },
       { capabilities: ["repo.file.write"] },
       { grant: "grant_123" },
@@ -58,26 +85,16 @@ describe("experience cannot carry authority", () => {
       { risk: "LOW" },
       { execute: true },
       { policy: "disable verification" },
-      { credentials: "sk-something" },
-    ];
-    for (const attempt of hostile) {
-      expect(
-        ExperienceRecord.safeParse(record(attempt)).success,
-        `a record carrying ${JSON.stringify(attempt)} must be rejected`,
-      ).toBe(false);
-    }
-  });
-
-  it("has nowhere to put file contents, diffs, prompts or responses", () => {
-    // Those live where they are already bounded and governed. Experience
-    // references them; it does not become a second, weaker store of them.
-    for (const attempt of [
-      { content: "export const secret = 1;" },
-      { diff: "@@ -1 +1 @@" },
-      { prompt: "you are a helpful assistant" },
-      { response: "{...}" },
+      { credentials: "placeholder" },
     ]) {
-      expect(ExperienceRecord.safeParse(record(attempt)).success).toBe(false);
+      expect(
+        EpisodicExperience.safeParse(episodic(attempt)).success,
+        `episodic carrying ${JSON.stringify(attempt)} must be rejected`,
+      ).toBe(false);
+      expect(
+        PortableLesson.safeParse(portable(attempt)).success,
+        `portable carrying ${JSON.stringify(attempt)} must be rejected`,
+      ).toBe(false);
     }
   });
 
@@ -97,62 +114,218 @@ describe("experience cannot carry authority", () => {
 });
 
 // ===========================================================================
-describe("an agent claim is not a verified outcome", () => {
-  it("keeps the two as distinct, ordered sources", () => {
-    expect(OutcomeSource.options).toContain("AGENT_CLAIM");
-    expect(OutcomeSource.options).toContain("VERIFICATION_RESULT");
-    // An agent claim is never counted as independent corroboration.
-    expect(INDEPENDENT_SOURCES).not.toContain("AGENT_CLAIM");
-    expect(INDEPENDENT_SOURCES).not.toContain("PROCESS_OBSERVATION");
+describe("the content boundary is structural, not a naming convention", () => {
+  it("admits plainly that an EPISODIC record holds project content", () => {
+    /**
+     * Not a weakness being hidden - a truth being typed. These fields are free
+     * text from a real run and can contain anything a repository can contain.
+     * The protection is that `scope` cannot say anything but "project".
+     */
+    const parsed = EpisodicExperience.parse(episodic({
+      planSummary: "Refactored the token parser in the auth module.",
+      failures: ["The first attempt broke the refresh path."],
+    }));
+    expect(parsed.scope).toBe("project");
+    expect(parsed.planSummary).toContain("token parser");
   });
 
-  it("gives a claim-only outcome the LOWEST confidence", () => {
-    expect(confidenceFrom(["AGENT_CLAIM"])).toBe("low");
-    // Even an emphatic one. Repetition by the same agent is not evidence.
-    expect(confidenceFrom(["AGENT_CLAIM", "AGENT_CLAIM", "AGENT_CLAIM"])).toBe("low");
+  it("makes an episodic record STRUCTURALLY unable to claim wider scope", () => {
+    for (const attempt of ["global", "cross-project", "shared", "any", ""]) {
+      expect(
+        EpisodicExperience.safeParse(episodic({ scope: attempt })).success,
+        `scope "${attempt}" must be unrepresentable`,
+      ).toBe(false);
+    }
+  });
+
+  it("makes a PORTABLE lesson unable to carry a payload", () => {
+    const payloads = [
+      ["a file path", "See src/auth/token.ts for the fix."],
+      ["a diff hunk", "@@ -1,4 +1,4 @@ const a = 1;"],
+      ["JSON", 'Use {"retries": 3} as the default.'],
+      ["a key assignment", "Set API_KEY=abcdefghijklmnop in the environment."],
+      ["a base64-ish token", "The token ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAA works."],
+      ["a newline", "First lesson.\nSecond lesson."],
+      ["backticks", "Call `readFileSync` instead."],
+      ["a URL", "See https://example.invalid/docs for details."],
+    ] as const;
+
+    for (const [label, statement] of payloads) {
+      expect(
+        PortableLesson.safeParse(portable({ statement })).success,
+        `a portable lesson must not be able to carry ${label}`,
+      ).toBe(false);
+    }
+  });
+
+  it("still allows an ordinary prose lesson", () => {
+    const parsed = PortableLesson.parse(portable({
+      statement: "Adding a regression test before refactoring shared logic "
+        + "has repeatedly caught breakage early.",
+    }));
+    expect(parsed.statement).toContain("regression test");
+  });
+
+  it("CANNOT mark anything eligible to cross a project boundary", () => {
+    /**
+     * The strongest guarantee this foundation actually makes. There is no value
+     * meaning "yes", so no code written before the sanitisation design exists
+     * can promote a lesson across projects - by accident or otherwise.
+     */
+    for (const attempt of [true, "true", 1, "yes"]) {
+      expect(
+        PortableLesson.safeParse(portable({ crossProjectEligible: attempt })).success,
+        `crossProjectEligible=${JSON.stringify(attempt)} must be unrepresentable`,
+      ).toBe(false);
+    }
+    expect(PortableLesson.parse(portable()).crossProjectEligible).toBe(false);
+  });
+
+  it("keeps evidence a REFERENCE, and refuses prose in the ref", () => {
+    const parsed = EpisodicExperience.parse(episodic({
+      evidence: [{ source: "VERIFICATION_RESULT", ref: "check:typecheck" }],
+    }));
+    expect(Object.keys(parsed.evidence[0]!)).toEqual(["source", "ref"]);
+
+    for (const attempt of [
+      { source: "VERIFICATION_RESULT", ref: "the check failed because x = 1" },
+      { source: "VERIFICATION_RESULT", ref: "@@ -1 +1 @@ diff" },
+      { source: "VERIFICATION_RESULT", ref: "line one\nline two" },
+      { source: "VERIFICATION_RESULT", ref: "r", content: "output" },
+    ]) {
+      expect(
+        EpisodicExperience.safeParse(episodic({ evidence: [attempt] })).success,
+        `evidence ${JSON.stringify(attempt)} must be rejected`,
+      ).toBe(false);
+    }
+  });
+});
+
+// ===========================================================================
+describe("confidence cannot be asserted independently of its evidence", () => {
+  it("REFUSES to store confidence at all", () => {
+    /**
+     * The correction. Storing a derived trust value beside the evidence it is
+     * derived from is what let a record say `very_high` on an agent's say-so.
+     * It is read from `sources`, never written next to them.
+     */
+    expect(EpisodicExperience.safeParse(
+      episodic({ confidence: "very_high" })).success).toBe(false);
+    expect(EpisodicExperience.safeParse(
+      episodic({ confidence: "low" })).success).toBe(false);
+    expect(Object.keys(EpisodicExperience.parse(episodic()))).not.toContain("confidence");
+  });
+
+  it("REFUSES to store independentlyVerified", () => {
+    expect(EpisodicExperience.safeParse(
+      episodic({ independentlyVerified: true })).success).toBe(false);
+    expect(Object.keys(EpisodicExperience.parse(episodic())))
+      .not.toContain("independentlyVerified");
+  });
+
+  it("cannot represent the dangerous state the review identified", () => {
+    // sources: agent-only, confidence: very_high, independentlyVerified: true
+    expect(EpisodicExperience.safeParse(episodic({
+      sources: ["AGENT_CLAIM"],
+      confidence: "very_high",
+      independentlyVerified: true,
+    })).success).toBe(false);
+  });
+
+  it("excludes the agent and the OS from what counts as independent", () => {
+    /**
+     * The constant, asserted directly rather than only through behaviour.
+     * `PROCESS_OBSERVATION` is the subtle one: an exit code is a fact about a
+     * program finishing, not corroboration that a repository is in the intended
+     * state, so it must not count towards independence.
+     */
+    expect(INDEPENDENT_SOURCES).not.toContain("AGENT_CLAIM");
+    expect(INDEPENDENT_SOURCES).not.toContain("PROCESS_OBSERVATION");
+    expect([...INDEPENDENT_SOURCES].sort()).toEqual([
+      "HUMAN_DECISION", "REPOSITORY_OBSERVATION", "REVIEW_FINDING",
+      "VERIFICATION_RESULT",
+    ]);
+    // Every independent source is a real member of the source vocabulary.
+    for (const source of INDEPENDENT_SOURCES) {
+      expect(OutcomeSource.options).toContain(source);
+    }
+  });
+
+  it("derives low confidence from an agent claim, however often repeated", () => {
+    expect(provisionalConfidence(["AGENT_CLAIM"])).toBe("low");
+    expect(provisionalConfidence(["AGENT_CLAIM", "AGENT_CLAIM", "AGENT_CLAIM"]))
+      .toBe("low");
+    expect(isIndependentlyVerified(["AGENT_CLAIM"])).toBe(false);
+    // An exit code is not corroboration of repository state.
+    expect(isIndependentlyVerified(["AGENT_CLAIM", "PROCESS_OBSERVATION"])).toBe(false);
   });
 
   it("raises confidence only as independent evidence appears", () => {
-    expect(confidenceFrom(["AGENT_CLAIM", "PROCESS_OBSERVATION"])).toBe("medium");
-    expect(confidenceFrom(["AGENT_CLAIM", "REPOSITORY_OBSERVATION"])).toBe("medium");
-    expect(confidenceFrom(["AGENT_CLAIM", "VERIFICATION_RESULT"])).toBe("high");
-    expect(confidenceFrom(["REVIEW_FINDING"])).toBe("high");
-    expect(confidenceFrom(["HUMAN_DECISION"])).toBe("high");
+    expect(provisionalConfidence(["AGENT_CLAIM", "PROCESS_OBSERVATION"])).toBe("medium");
+    expect(provisionalConfidence(["REPOSITORY_OBSERVATION"])).toBe("medium");
+    expect(provisionalConfidence(["VERIFICATION_RESULT"])).toBe("high");
+    expect(provisionalConfidence(["REVIEW_FINDING"])).toBe("high");
+    expect(isIndependentlyVerified(["REPOSITORY_OBSERVATION"])).toBe(true);
   });
 
-  it("requires REPEATED independent confirmation for very_high", () => {
-    // One verified run is high, never very_high - that needs recurrence, and
-    // recurrence is a count of real records rather than an assumption.
-    expect(confidenceFrom(["VERIFICATION_RESULT"], 1)).toBe("high");
-    expect(confidenceFrom(["VERIFICATION_RESULT"], 2)).toBe("high");
-    expect(confidenceFrom(["VERIFICATION_RESULT"], 3)).toBe("very_high");
-    // Repetition without independent evidence stays low.
-    expect(confidenceFrom(["AGENT_CLAIM"], 99)).toBe("low");
+  it("CANNOT reach very_high from this module at all", () => {
+    /**
+     * Recurrence must be counted from attributable records, and no store exists
+     * to count them in. The previous helper took the count from the caller,
+     * which let anyone assert recurrence nobody had demonstrated.
+     */
+    const everySource = OutcomeSource.options;
+    expect(provisionalConfidence(everySource)).toBe("high");
+    // The vocabulary retains the value; nothing here produces it.
+    expect(EvidenceConfidence.options).toContain("very_high");
   });
 
-  it("defaults a record to low confidence and unverified", () => {
-    const parsed = ExperienceRecord.parse(record());
-    expect(parsed.confidence).toBe("low");
-    expect(parsed.independentlyVerified).toBe(false);
-    expect(parsed.status).toBe("candidate");
+  it("marks the confirmation threshold as an UNVALIDATED assumption", () => {
+    // Recorded so a future task cannot quietly treat it as established fact.
+    expect(PROVISIONAL_THRESHOLDS.confirmationsForVeryHigh).toBe(3);
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "..", "src", "domain", "experience.ts"), "utf8",
+    );
+    expect(source).toContain("UNVALIDATED");
+  });
+
+  it("keeps the confidence vocabulary bounded and non-authoritative", () => {
+    expect(EvidenceConfidence.options).toEqual(["low", "medium", "high", "very_high"]);
+    expect(EvidenceConfidence.safeParse("certain").success).toBe(false);
+    expect(EvidenceConfidence.safeParse(1).success).toBe(false);
+    // It is a label, not a permission: no capability name is a valid value.
+    expect(EvidenceConfidence.safeParse("repo.file.write").success).toBe(false);
   });
 });
 
 // ===========================================================================
 describe("a single observation is not a rule", () => {
-  it("can hold a lesson without believing it", () => {
-    for (const status of ["candidate", "uncertain", "contradicted", "deprecated"] as const) {
+  it("can hold a lesson without believing it, and retire it without deleting it", () => {
+    for (const status of
+      ["candidate", "supported", "uncertain", "contradicted", "deprecated"] as const) {
       expect(LessonStatus.options).toContain(status);
     }
-    // `supported` exists, but nothing reaches it by default.
-    expect(ExperienceRecord.parse(record()).status).toBe("candidate");
+    expect(EpisodicExperience.parse(episodic()).status).toBe("candidate");
+    expect(PortableLesson.parse(portable()).status).toBe("candidate");
   });
 
-  it("names the three memory layers", () => {
+  it("names the three memory layers and pins each type to its own", () => {
     expect(MemoryLayer.options).toEqual(["episodic", "semantic", "procedural"]);
-    // Episodic is the default: the most specific and most privacy-sensitive,
-    // so nothing is generalised across projects by accident.
-    expect(ExperienceRecord.parse(record()).layer).toBe("episodic");
+    // An episodic record cannot relabel itself as semantic to look portable.
+    expect(EpisodicExperience.safeParse(episodic({ layer: "semantic" })).success)
+      .toBe(false);
+    expect(PortableLesson.safeParse(portable({ layer: "episodic" })).success)
+      .toBe(false);
+  });
+
+  it("counts support and contradiction separately", () => {
+    const parsed = PortableLesson.parse(portable({
+      supportingRecords: 4, contradictingRecords: 2,
+    }));
+    expect(parsed.supportingRecords).toBe(4);
+    expect(parsed.contradictingRecords).toBe(2);
+    // Both default to zero: nothing is assumed supported.
+    expect(PortableLesson.parse(portable()).supportingRecords).toBe(0);
   });
 });
 
@@ -160,7 +333,7 @@ describe("a single observation is not a rule", () => {
 describe("experience stays bounded", () => {
   it("caps every list and every free-text field", () => {
     const over = (field: string, value: unknown) =>
-      ExperienceRecord.safeParse(record({ [field]: value })).success;
+      EpisodicExperience.safeParse(episodic({ [field]: value })).success;
 
     expect(over("failures",
       Array.from({ length: EXPERIENCE_LIMITS.maxFailures + 1 }, () => "f"))).toBe(false);
@@ -176,33 +349,25 @@ describe("experience stays bounded", () => {
   });
 
   it("accepts a record exactly at the limits", () => {
-    expect(ExperienceRecord.safeParse(record({
+    expect(EpisodicExperience.safeParse(episodic({
       planSummary: "x".repeat(EXPERIENCE_LIMITS.maxSummaryLength),
       failures: Array.from({ length: EXPERIENCE_LIMITS.maxFailures }, () => "f"),
     })).success).toBe(true);
   });
 
-  it("stores evidence as a REFERENCE, never a payload", () => {
-    const parsed = ExperienceRecord.parse(record({
-      evidence: [{ source: "VERIFICATION_RESULT", ref: "check:typecheck" }],
-    }));
-    expect(parsed.evidence[0]!.ref).toBe("check:typecheck");
-    // There is no field for the content behind the reference.
-    expect(Object.keys(parsed.evidence[0]!)).toEqual(["source", "ref"]);
-    expect(ExperienceRecord.safeParse(record({
-      evidence: [{ source: "VERIFICATION_RESULT", ref: "r", content: "output" }],
+  it("keeps a portable lesson short", () => {
+    expect(PortableLesson.safeParse(portable({
+      statement: "a".repeat(EXPERIENCE_LIMITS.maxLessonStatementLength + 1),
     })).success).toBe(false);
+    expect(PortableLesson.safeParse(portable({
+      statement: "a".repeat(EXPERIENCE_LIMITS.maxLessonStatementLength),
+    })).success).toBe(true);
   });
 });
 
 // ===========================================================================
 describe("the live authority model is unchanged", () => {
   it("has NOT gained a historical-experience provenance yet", () => {
-    /**
-     * Deliberate. Nothing produces experience, so a provenance class in the
-     * live table that no record ever uses would be a claim the system does not
-     * honour. Task 009 adds it, with the rank declared alongside.
-     */
     expect(ContextProvenance.options).not.toContain(INTENDED_EXPERIENCE_PROVENANCE);
     expect(Object.keys(PROVENANCE_RANK)).not.toContain(INTENDED_EXPERIENCE_PROVENANCE);
   });
@@ -223,7 +388,6 @@ describe("the live authority model is unchanged", () => {
   });
 
   it("plans a rank for experience that outranks no human or observed source", () => {
-    // Above a bare agent claim, below everything the orchestrator saw itself.
     expect(INTENDED_EXPERIENCE_RANK)
       .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_AGENT_CLAIM);
     expect(INTENDED_EXPERIENCE_RANK).toBeLessThan(PROVENANCE_RANK.TASK_DESCRIPTION);
@@ -235,11 +399,6 @@ describe("the live authority model is unchanged", () => {
 // ===========================================================================
 describe("the foundation is architecture only", () => {
   it("is imported by NO production code", () => {
-    /**
-     * The guard on "no learning engine exists yet". The moment something in
-     * `src/` starts writing experience records, this fails - which is the
-     * signal that a deliberate task has begun, not an accident.
-     */
     const root = path.resolve(__dirname, "..", "src");
     const importers: string[] = [];
     const walk = (dir: string): void => {
@@ -257,17 +416,33 @@ describe("the foundation is architecture only", () => {
     expect(importers).toEqual([]);
   });
 
-  it("adds no store, retrieval or learning implementation", () => {
+  it("adds no store, retrieval, evaluator or learning implementation", () => {
     const root = path.resolve(__dirname, "..", "src");
-    for (const forbidden of ["experienceStore", "learningEngine", "experienceRetrieval"]) {
-      expect(fs.existsSync(path.join(root, `${forbidden}.ts`))).toBe(false);
-    }
-    // And no vector/embedding dependency crept in.
+    const forbidden = [
+      "experienceStore.ts", "learningEngine.ts", "experienceRetrieval.ts",
+      "lessonEvaluator.ts", "confidenceEngine.ts",
+    ];
+    const found: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { walk(full); continue; }
+        if (forbidden.includes(entry.name)) found.push(entry.name);
+      }
+    };
+    walk(root);
+    expect(found).toEqual([]);
+  });
+
+  it("adds no vector or embedding dependency", () => {
     const pkg = JSON.parse(
       fs.readFileSync(path.resolve(__dirname, "..", "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string> };
-    for (const name of Object.keys(pkg.dependencies ?? {})) {
-      expect(name).not.toMatch(/vector|embedding|pinecone|chroma|faiss/i);
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    for (const name of [
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+    ]) {
+      expect(name).not.toMatch(/vector|embedding|pinecone|chroma|faiss|weaviate|qdrant/i);
     }
   });
 

@@ -4,9 +4,14 @@
 approval is the Project Director's decision.
 
 > **Nothing in this document is implemented as behaviour.** There is no
-> experience store, no retrieval, no confidence engine, and nothing in the
-> workflow writes an experience record. `src/domain/experience.ts` declares the
-> shape; a test asserts no production code imports it.
+> experience store, no retrieval, no confidence evaluator, and nothing in the
+> workflow writes a record. `src/domain/experience.ts` declares the shape; a
+> test asserts no production code imports it.
+>
+> **This document has been corrected.** Two claims in its first version were
+> false — that the absence of a `content` field prevented cross-project leakage,
+> and that confidence was derived rather than asserted. Both are now enforced by
+> the schema instead of by prose. See §4 and §7.
 
 The reason to decide the shape now, while Task 008 is being built, is that the
 awkward questions — what may be stored, what may cross a project boundary, what
@@ -27,11 +32,12 @@ decision, **text that arrived from storage**. It can inform a proposal. It can
 never approve one, grant a capability, widen a scope, lower a risk
 classification, or disable a check.
 
-This is enforced structurally, exactly as the reasoning boundary is:
-`ExperienceRecord` declares no authority-shaped field, `.strict()` refuses any
-that appears, and `FORBIDDEN_EXPERIENCE_KEYS` is asserted against the parsed
-shape. A record carrying `approved`, `capabilities`, `grant`, `allowedScope`,
-`risk` or `policy` is **rejected in full** — tested.
+This is enforced structurally, exactly as the reasoning boundary is: neither
+`EpisodicExperience` nor `PortableLesson` declares an authority-shaped field,
+`.strict()` refuses any that appears, and `FORBIDDEN_EXPERIENCE_KEYS` is
+asserted against the parsed shape. A record carrying `approved`,
+`capabilities`, `grant`, `allowedScope`, `risk` or `policy` is **rejected in
+full** — tested against both types.
 
 ---
 
@@ -70,7 +76,7 @@ not that a repository is in the intended state.
 
 ---
 
-## 4. Confidence is derived from evidence, never invented
+## 4. Confidence vocabulary — and what this foundation does NOT decide
 
 Four ordinal levels, not a score:
 
@@ -79,18 +85,41 @@ Four ordinal levels, not a score:
 | `low` | an agent said so, nothing corroborates it |
 | `medium` | the OS and/or the repository corroborate it |
 | `high` | a check ran, or a human reviewed it |
-| `very_high` | independently repeated across ≥3 separate runs |
+| `very_high` | independently repeated — **not reachable from this module** |
 
 Deliberately **not a float**. A number invites a scoring formula, and a formula
-invented without data dresses a guess as a measurement. These levels state which
-*kinds* of evidence exist, which is a fact.
+invented without data dresses a guess as a measurement.
 
-`very_high` additionally requires recurrence, and recurrence is a **count of
-real records** the caller supplies — not something `confidenceFrom` can conjure.
-The default is 1: this run, once. Repetition by the same agent never raises
-confidence; a hundred emphatic claims stay `low`.
+### Corrected: confidence is not stored, and recurrence is not caller-supplied
 
----
+The first version of this foundation claimed "confidence is derived, never
+invented" while `ExperienceRecord` accepted `confidence` and
+`independentlyVerified` as writable fields. A caller could store
+`sources: ["AGENT_CLAIM"]` beside `confidence: "very_high"` and the schema would
+accept it. The claim was false.
+
+Both fields are now **absent from the schema**, and `.strict()` rejects them.
+Trust is read from `sources` by `provisionalConfidence` and
+`isIndependentlyVerified`, so a record cannot assert a level its own evidence
+contradicts. The dangerous state is unrepresentable rather than discouraged.
+
+The helper also no longer accepts an `independentConfirmations` integer. Taking
+that number from the caller let `confidenceFrom(["VERIFICATION_RESULT"], 3)`
+claim recurrence nobody had demonstrated — a caller-asserted trust value wearing
+the costume of a derivation.
+
+`provisionalConfidence` therefore **tops out at `high`** and is explicitly **not
+a security boundary**. Reaching `very_high` requires counting independent
+confirmations across attributable records, which needs a store that does not
+exist. **Task 011 owns the authoritative derivation.**
+
+### The "three confirmations" threshold is an assumption, not a finding
+
+`PROVISIONAL_THRESHOLDS.confirmationsForVeryHigh = 3` is recorded as
+**UNVALIDATED**. No experience dataset exists, so nobody knows whether three
+confirmations is sufficient evidence for anything. Task 011 must justify,
+validate or replace it against real data — and **may not mark it settled merely
+because the code compiles and the tests pass.**
 
 ## 5. A single observation is not a rule
 
@@ -119,21 +148,56 @@ different retrieval rules; conflating them later would be expensive.
 
 ---
 
-## 7. Cross-project learning, and its hard boundary
+## 7. Cross-project learning, and its actual boundary
 
-The eventual system should accumulate general engineering experience across
-projects. It must **never** leak secrets, credentials, file contents, private
-data or protected project information between them.
+### The claim this section used to make was wrong
 
-The structural protection is already in the record: `ExperienceRecord` has **no
-field for content**. Evidence is stored as an `EvidenceRef` — a source and an
-identifier, never a payload. There is nowhere to put a diff, a prompt, a model
-response, or a file, and a record attempting to carry one is rejected. Tested.
+It said cross-project leakage was prevented structurally "because
+`ExperienceRecord` has no field for content". That was false. `planSummary`,
+`implementationOutcome`, `failures`, `successfulPatterns` and the rest are
+**free text written from a real run** — and free text *is* content. It can carry
+a diff, a path, an error message, a model response or a pasted secret just as
+effectively as a field named `content` would. The absence of that **name**
+prevented nothing.
 
-Cross-project retrieval, when it arrives, operates on the semantic layer over
-explicitly sanitised material — not on episodic records.
+### What is actually true now
 
----
+The foundation splits into two types with different rules.
+
+**`EpisodicExperience` — project-scoped, and NOT safe to share.**
+It carries bounded free-text summaries from a real run, and the type says so:
+`scope` is the literal `"project"` and there is no other permitted value. No
+later code can mark an episodic record shareable, because the field cannot hold
+another value. It should be treated as project-confidential.
+
+**`PortableLesson` — the only shape aimed at crossing a boundary.**
+No summaries, no failure lists, no evidence text. Only a short `statement` under
+a **character allowlist** (letters, digits, spaces, light sentence punctuation),
+a kebab-case `taskType`, and support/contradiction counts. Paths, diff hunks,
+JSON, `KEY=value` assignments, tokens, URLs, backticks and newlines are
+**unrepresentable**, not merely discouraged.
+
+That is a genuine restriction and not a sanitiser: a determined caller could
+still write a secret in plain English. Which is why:
+
+**`crossProjectEligible` is the literal `false`.** There is no value meaning
+"yes". Nothing written before the sanitisation design exists can promote a
+lesson across a project boundary — not by mistake, and not on purpose. Enabling
+it requires changing that line, which is a visible, reviewable act owned by
+Task 010.
+
+Evidence remains a **reference**, and `ref` is now constrained to an identifier
+shape — no spaces, no newlines, no prose punctuation — so it cannot become a
+smuggling channel for the payload it points at.
+
+### Honest summary
+
+| Guaranteed today | Deferred to Tasks 009–011 |
+| --- | --- |
+| Episodic records cannot claim wider scope | Deciding what a sanitised lesson may say |
+| Portable lessons cannot carry paths, diffs, tokens or assignments | Validating that prose lessons are leak-free |
+| Nothing can be marked cross-project eligible | Cross-project retrieval itself |
+| Evidence is referenced, never copied | Eligibility evaluation |
 
 ## 8. Experience reaches reasoning only through Task 007
 
@@ -225,20 +289,49 @@ The capability matrix is unchanged: `git.mutate`, `process.execute` and
 
 ---
 
-## 13. Limitations
+## 13. Limitations — classified
 
-1. **Nothing here is behaviour.** Every claim in this document is about a shape,
-   not a running system, and a shape can be changed by whoever implements
-   Task 009. The tests raise the cost of changing it silently; they do not make
-   it impossible.
-2. **The confidence ladder is a design, not a validated model.** Whether
-   "three independent confirmations" is the right threshold is unknown, because
-   no data exists yet.
-3. **Sanitisation for cross-project material is not designed.** The record has
-   no content field, which prevents the obvious leak; deciding what a *sanitised
-   semantic lesson* may say is Task 010's problem and is genuinely hard.
-4. **Lesson quality is unaddressed.** A well-evidenced lesson can still be the
-   wrong generalisation, and nothing here would notice.
-5. **The examples in this document are illustrative.** No project outcomes,
-   patterns, confidence values or historical experiences have been invented as
-   though they were real.
+### Solved by this correction
+
+1. **Free text was being described as if it were not content.** Episodic records
+   are now typed as project-scoped with a literal `scope`, and a separate
+   `PortableLesson` type is structurally unable to carry paths, diffs, JSON,
+   assignments, tokens, URLs or newlines.
+2. **Confidence could be asserted against its own evidence.** `confidence` and
+   `independentlyVerified` are no longer storable; they are read from `sources`.
+3. **Recurrence was caller-supplied.** The `independentConfirmations` parameter
+   is gone; `provisionalConfidence` tops out at `high`.
+4. **Nothing can be marked cross-project eligible.** `crossProjectEligible` is
+   the literal `false`.
+5. **Evidence refs could hold prose.** `ref` is now constrained to an identifier
+   shape.
+
+### Intentionally deferred — and these are acceptance requirements, not excuses
+
+A future task **may not mark any of these solved merely because the code
+compiles and the tests pass.** Each needs evidence or a design, not an
+implementation that runs.
+
+1. **Empirical validation of confidence thresholds** — Task 011. The value 3 is
+   an assumption recorded as `UNVALIDATED`. It needs justification against real
+   experience data, or replacement.
+2. **Semantic sanitisation and cross-project eligibility** — Task 010. The
+   character allowlist prevents structured payloads; it does not prevent a
+   secret written in plain English. Deciding what a sanitised lesson may say,
+   and who certifies it, is genuinely hard and is not designed.
+3. **Lesson-quality and generalisation evaluation** — Task 011. A well-evidenced
+   lesson can still be the wrong generalisation, and nothing here would notice.
+4. **Contradiction resolution** — Task 011. `contradicted` and `uncertain` exist
+   as states; no policy decides when a lesson enters them or what happens next.
+5. **Retrieval relevance** — Task 010. Nothing decides which past experience
+   applies to a new task, and a plausible-but-irrelevant lesson is worse than
+   none.
+6. **Procedural-strategy validation** — Task 012. That a sequence of steps
+   worked before is not evidence it will work again.
+
+### Standing limitations of the foundation itself
+
+7. **Nothing here is behaviour.** Every claim is about a shape. The tests raise
+   the cost of changing it silently; they do not make it impossible.
+8. **The examples in this document are illustrative.** No project outcomes,
+   patterns, confidence values or histories have been invented as though real.
