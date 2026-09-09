@@ -235,6 +235,92 @@ describe("ranking", () => {
       .toEqual([...shuffled].sort(compareForOrdering).map((c) => c.id));
   });
 
+  it("orders by code unit, not by locale-sensitive collation", () => {
+    /**
+     * ADDED AFTER REVIEW FOUND A DETERMINISM DEFECT.
+     *
+     * The comparator used the locale-aware string collation method. Its answer
+     * depends on the host locale and on the ICU data the runtime was built
+     * with, so two machines could order the same corpus differently while every
+     * test passed on both - a determinism claim resting on a property of the
+     * machine rather than of the code.
+     *
+     * The pair below is where the two primitives genuinely disagree: under
+     * en-US collation "a" sorts BEFORE "B", while by code unit "B" (0x42) sorts
+     * before "a" (0x61). So this is a BEHAVIOURAL test, not a stylistic one -
+     * reintroducing collation flips these assertions regardless of what the
+     * source happens to look like.
+     */
+    const lower = "a";
+    const upper = "B";
+    const byCodeUnit = lower < upper ? -1 : 1;
+    expect(
+      lower.localeCompare(upper) !== byCodeUnit,
+      "this fixture only proves anything where the two primitives disagree",
+    ).toBe(true);
+
+    // id ASCENDING by code unit: "B" precedes "a", so "a" compares AFTER "B".
+    expect(compareForOrdering(
+      { score: 1, createdAt: "2026-01-01T00:00:00.000Z", id: "a" },
+      { score: 1, createdAt: "2026-01-01T00:00:00.000Z", id: "B" },
+    )).toBeGreaterThan(0);
+
+    // createdAt DESCENDING by code unit: "a" is the greater, so it comes first.
+    expect(compareForOrdering(
+      { score: 1, createdAt: "a", id: "x" },
+      { score: 1, createdAt: "B", id: "x" },
+    )).toBeLessThan(0);
+  });
+
+  it("keeps locale-sensitive collation out of the ordering path", () => {
+    /**
+     * The structural half. The behavioural test above proves the CURRENT
+     * comparator is code-unit; this one stops collation returning anywhere in
+     * the ordering path, including the store sort the retrieval cursor depends
+     * on agreeing with.
+     *
+     * The token is assembled rather than written literally, so this file does
+     * not trip its own scan.
+     */
+    const collate = "locale" + "Compare";
+    for (const file of [
+      path.resolve(__dirname, "..", "src", "experience", "experienceRetrieval.ts"),
+      path.resolve(__dirname, "..", "src", "experience", "experienceStore.ts"),
+    ]) {
+      expect(fs.readFileSync(file, "utf8"), `${path.basename(file)} must not collate`)
+        .not.toContain(collate);
+    }
+  });
+
+  it("orders the same way under any ambient locale", () => {
+    /**
+     * A test that only passes on the machine that wrote it is not evidence.
+     * Code-unit comparison is a language property and consults no locale, so
+     * changing the ambient locale environment must change nothing.
+     */
+    const sample = [
+      { score: 90, createdAt: "2026-03-01T00:00:00.000Z", id: "mmm" },
+      { score: 90, createdAt: "2026-01-01T00:00:00.000Z", id: "bbb" },
+      { score: 10, createdAt: "2026-09-01T00:00:00.000Z", id: "aaa" },
+    ];
+    const expected = [...sample].sort(compareForOrdering).map((c) => c.id);
+
+    const saved = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+    try {
+      for (const locale of ["tr-TR.UTF-8", "de-DE.UTF-8", "C", "en-US.UTF-8"]) {
+        process.env.LANG = locale;
+        process.env.LC_ALL = locale;
+        expect([...sample].sort(compareForOrdering).map((c) => c.id), locale)
+          .toEqual(expected);
+      }
+    } finally {
+      if (saved.LANG === undefined) delete process.env.LANG;
+      else process.env.LANG = saved.LANG;
+      if (saved.LC_ALL === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = saved.LC_ALL;
+    }
+  });
+
   it("produces identical results across repeated retrievals", () => {
     for (let i = 0; i < 12; i += 1) {
       write("alpha", {
@@ -505,7 +591,15 @@ describe("empty is not the same as incomplete", () => {
     expect(found.coverage.kind).toBe("bounded");
     if (found.coverage.kind !== "bounded") return;
     expect(found.coverage.reason).toBe("scan_incomplete");
-  }, 110_000);
+    /**
+     * A generous ceiling, on purpose. Creating twenty thousand files is the only
+     * way to reach the directory bound, and its cost is dominated by the host's
+     * filesystem rather than by anything under test - measured here at 9s idle
+     * and 218s while the machine was busy, a 24x spread with no code change
+     * between them. A limit tight enough to catch a hang would report ordinary
+     * background load as a product defect.
+     */
+  }, 300_000);
 
   it("says complete when it examined everything and found nothing", () => {
     write("alpha", { planSummary: "findable widget" });

@@ -485,10 +485,29 @@ export class ExperienceStore {
       .filter((e): e is { name: string; parsed: { stamp: string; id: string } } =>
         e.parsed !== null);
 
+    /**
+     * PLAIN OPERATORS, NOT LOCALE-SENSITIVE COLLATION - CORRECTED WITH TASK 010.
+     *
+     * This sort used the locale-aware collation method, whose answer depends on
+     * the host locale and the runtime's ICU data. Two machines could therefore
+     * page the same project in different orders.
+     *
+     * It also disagreed with the cursor filter just below, which compares with
+     * `<` and `>`. A sort and a cursor that order the same strings by different
+     * rules is how paging silently skips or repeats records - a defect
+     * introduced by Task 010's cursor, and so corrected by Task 010.
+     *
+     * The stamp is a fixed-width ASCII timestamp and the id is lower-case hex,
+     * so code-unit order IS the intended order and nothing is lost.
+     */
     entries.sort((a, b) => {
-      const stamp = b.parsed.stamp.localeCompare(a.parsed.stamp); // newest first
-      if (stamp !== 0) return stamp;
-      return a.parsed.id.localeCompare(b.parsed.id);              // stable tiebreak
+      if (a.parsed.stamp !== b.parsed.stamp) {
+        return a.parsed.stamp < b.parsed.stamp ? 1 : -1;  // newest first
+      }
+      if (a.parsed.id !== b.parsed.id) {
+        return a.parsed.id < b.parsed.id ? -1 : 1;        // stable tiebreak
+      }
+      return 0;
     });
 
     /**

@@ -220,14 +220,40 @@ function score(
  * black-box test can tell the two apart. That is exactly the dependence on
  * insertion order the ordering rule exists to remove - unobservable through the
  * public API, and therefore untested until the comparator itself is reachable.
+ *
+ * ---------------------------------------------------------------------------
+ * PLAIN OPERATORS, NOT LOCALE-SENSITIVE COLLATION - CORRECTED AFTER REVIEW
+ * ---------------------------------------------------------------------------
+ * The first version compared strings with the locale-aware collation method.
+ * That method's answer depends on the host's locale and on which ICU data the
+ * runtime was built with, so two machines could order the same corpus
+ * differently while every test passed on both. It flatly contradicted the
+ * determinism this comparator exists to provide, and independent review caught
+ * it.
+ *
+ * The difference is real, not theoretical: under `en-US` collation "a" sorts
+ * BEFORE "B", while by code unit "B" (0x42) sorts before "a" (0x61). A test
+ * pins that exact pair, so a return to collation fails a behavioural assertion
+ * rather than only a source scan.
+ *
+ * `<` and `>` on strings compare UTF-16 code units, which is a property of the
+ * language rather than of the environment. The values here are built for it -
+ * `createdAt` is an ISO-8601 timestamp and `id` is lower-case hex, both fixed
+ * ASCII shapes whose code-unit order IS their intended order. Locale-aware
+ * collation was never buying anything here; it was only adding a dependency on
+ * the machine.
  */
 export function compareForOrdering(
   a: { readonly score: number; readonly createdAt: string; readonly id: string },
   b: { readonly score: number; readonly createdAt: string; readonly id: string },
 ): number {
+  // Integer scores, bounded well inside the safe range: plain subtraction.
   if (a.score !== b.score) return b.score - a.score;
-  if (a.createdAt !== b.createdAt) return b.createdAt.localeCompare(a.createdAt);
-  return a.id.localeCompare(b.id);
+  // createdAt DESC, by code unit.
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
+  // experienceId ASC, by code unit.
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+  return 0;
 }
 
 export type ExperienceRetrievalResult =
