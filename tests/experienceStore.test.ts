@@ -781,7 +781,11 @@ describe("architecture boundaries", () => {
     // the moment the layer grows.
     const dir = path.resolve(__dirname, "..", "src", "experience");
     const sources = fs.readdirSync(dir).filter((name) => name.endsWith(".ts"));
-    expect(sources.sort()).toEqual(["experienceStore.ts", "projectQuota.ts"]);
+    // Grown by Task 010's retrieval layer. The list stays exact so that the
+    // capability/grant/process check below covers every file in the layer.
+    expect(sources.sort()).toEqual([
+      "experienceRetrieval.ts", "experienceStore.ts", "projectQuota.ts",
+    ]);
 
     for (const name of sources) {
       const source = fs.readFileSync(path.join(dir, name), "utf8");

@@ -183,8 +183,14 @@ still write a secret in plain English. Which is why:
 **`crossProjectEligible` is the literal `false`.** There is no value meaning
 "yes". Nothing written before the sanitisation design exists can promote a
 lesson across a project boundary — not by mistake, and not on purpose. Enabling
-it requires changing that line, which is a visible, reviewable act owned by
-Task 010.
+it requires changing that line, which is a visible, reviewable act.
+
+> **Corrected during Task 010.** This paragraph used to assign that act to Task
+> 010. It does not belong there: Task 010 is project-scoped retrieval, and its
+> brief forbids cross-project learning, portable-lesson generation and
+> sanitisation outright. No task currently owns cross-project eligibility, which
+> is the accurate position — the sanitisation design does not exist, and naming
+> a task that is not doing it would read as authorisation to a later reader.
 
 Evidence remains a **reference**, and `ref` is now constrained to an identifier
 shape — no spaces, no newlines, no prose punctuation — so it cannot become a
@@ -265,8 +271,8 @@ Experience → AI decides it is better → AI rewrites itself
 | --- | --- | --- |
 | 008 | Controlled Repository Evidence | implemented |
 | 008-A | Learning foundation (this document + types) | architecture only |
-| 009 | Experience / Learning Memory | not started |
-| 010 | Experience Retrieval | not started |
+| 009 | Experience / Learning Memory | implemented |
+| 010 | Experience Retrieval | implemented |
 | 011 | Learning Evaluation + Confidence | not started |
 | 012 | Adaptive Reasoning / Strategy Improvement | not started |
 | 013 | Controlled Self-Improvement | not started |
@@ -315,7 +321,7 @@ implementation that runs.
 1. **Empirical validation of confidence thresholds** — Task 011. The value 3 is
    an assumption recorded as `UNVALIDATED`. It needs justification against real
    experience data, or replacement.
-2. **Semantic sanitisation and cross-project eligibility** — Task 010. The
+2. **Semantic sanitisation and cross-project eligibility** — unassigned. The
    character allowlist prevents structured payloads; it does not prevent a
    secret written in plain English. Deciding what a sanitised lesson may say,
    and who certifies it, is genuinely hard and is not designed.

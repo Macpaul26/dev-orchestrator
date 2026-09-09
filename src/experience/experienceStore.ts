@@ -463,7 +463,10 @@ export class ExperienceStore {
    * total. See `ExperienceRecordCount` for why that is a different shape rather
    * than a smaller number.
    */
-  list(projectId: string, options: { limit?: number } = {}): TExperienceListing {
+  list(
+    projectId: string,
+    options: { limit?: number; after?: string } = {},
+  ): TExperienceListing {
     const empty = ExperienceListing.parse({
       records: [], defects: [], count: { kind: "exact", records: 0 },
     });
@@ -488,6 +491,33 @@ export class ExperienceStore {
       return a.parsed.id.localeCompare(b.parsed.id);              // stable tiebreak
     });
 
+    /**
+     * ADDED FOR TASK 010, AND THE ONLY TASK 009 BEHAVIOUR IT TOUCHES.
+     *
+     * A cursor into the SAME total order the page already used. Without it, the
+     * retrieval layer could only ever see the newest `maxListResults` records of
+     * a project that may hold five thousand - so retrieval would be one page of
+     * storage under another name, which is exactly what it must not be. The
+     * alternatives were worse: a new unbounded store method, or a retrieval
+     * layer reading the filesystem itself.
+     *
+     * Purely additive. `list(projectId)` with no cursor behaves exactly as
+     * before, the ordering is unchanged, and nothing here relaxes a bound.
+     *
+     * The cursor is a FILENAME from this same directory, so it is opaque to
+     * callers and meaningful only against this ordering. A malformed one returns
+     * an empty listing rather than silently starting from the beginning: paging
+     * from the wrong place would quietly re-examine or skip records.
+     */
+    let ordered = entries;
+    if (options.after !== undefined) {
+      const cursor = parseFileName(options.after);
+      if (cursor === null) return empty;
+      ordered = entries.filter((entry) =>
+        entry.parsed.stamp < cursor.stamp
+        || (entry.parsed.stamp === cursor.stamp && entry.parsed.id > cursor.id));
+    }
+
     const limit = Math.min(
       options.limit ?? EXPERIENCE_STORAGE_LIMITS.maxListResults,
       EXPERIENCE_STORAGE_LIMITS.maxListResults,
@@ -498,9 +528,19 @@ export class ExperienceStore {
     let bytesReturned = 0;
     // An incomplete scan is itself a bound that stopped this listing returning
     // more, so it counts as truncation even when the page is not full.
-    let truncated = entries.length > limit || !scan.complete;
+    let truncated = ordered.length > limit || !scan.complete;
 
-    for (const entry of entries) {
+    /**
+     * The last entry this page CONSUMED, defect or record alike.
+     *
+     * Deliberately not "the last record returned": a page made entirely of
+     * corrupt files would then hand back a cursor that had not moved, and a
+     * caller paging on it would read the same entries forever. Advancing past
+     * everything examined is what makes paging terminate.
+     */
+    let consumed: string | null = null;
+
+    for (const entry of ordered) {
       if (records.length >= limit) break;
       const loaded = this.#load(dir, entry.name, projectId);
       if ("defect" in loaded) {
@@ -509,6 +549,7 @@ export class ExperienceStore {
         if (defects.length < EXPERIENCE_STORAGE_LIMITS.maxListResults) {
           defects.push(loaded.defect);
         }
+        consumed = entry.name;
         continue;
       }
       const size = Buffer.byteLength(JSON.stringify(loaded.stored), "utf8");
@@ -518,13 +559,26 @@ export class ExperienceStore {
       }
       records.push(loaded.stored);
       bytesReturned += size;
+      consumed = entry.name;
     }
 
     const count: TExperienceRecordCount = scan.complete
-      ? { kind: "exact", records: entries.length }
-      : { kind: "bounded", atLeast: entries.length };
+      ? { kind: "exact", records: ordered.length }
+      : { kind: "bounded", atLeast: ordered.length };
 
-    return ExperienceListing.parse({ records, defects, truncated, count, bytesReturned });
+    /**
+     * Null means "this page reached the end of the order", which is the only
+     * thing that lets a caller claim it saw everything. A page stopped by a
+     * bound returns where to resume, never null.
+     */
+    const exhausted = consumed !== null
+      && ordered.length > 0
+      && ordered[ordered.length - 1]!.name === consumed;
+
+    return ExperienceListing.parse({
+      records, defects, truncated, count, bytesReturned,
+      nextCursor: exhausted || consumed === null ? null : consumed,
+    });
   }
 
   /**

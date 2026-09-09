@@ -320,5 +320,14 @@ export const ExperienceListing = z.object({
   /** What could be established about the project's size. Never a bare number. */
   count: ExperienceRecordCount,
   bytesReturned: z.number().int().nonnegative().default(0),
+  /**
+   * Where to resume, or null when this page reached the end of the order.
+   *
+   * Null is the ONLY thing that entitles a caller to say it saw everything. A
+   * page stopped by any bound returns a cursor, so "there is no more" and "I
+   * stopped early" cannot be confused - the same distinction `count` makes
+   * about the directory scan, made here about the page.
+   */
+  nextCursor: z.string().max(300).nullable().default(null),
 }).strict();
 export type ExperienceListing = z.infer<typeof ExperienceListing>;

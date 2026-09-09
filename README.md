@@ -53,6 +53,28 @@ about a lock's age decides whether it may be taken: a lock is reclaimed when the
 kernel confirms its owner is gone, so a process that is merely slow keeps what it
 holds, and a process that has died is recovered from immediately.
 
+**Task 010 is implemented: experience retrieval.**
+
+Given a task and a project, retrieval returns a small, deterministic, relevant
+subset of that project's prior experience. Matching is plain lexical ranking over
+an explicitly enumerated projection of each record - no similarity index, no
+external search service, and no model call, because a model deciding which
+memories are worth trusting would be the system asking the untrusted component to
+select its own evidence.
+
+Relevance is not confidence. A score says a record matched the query under a
+documented policy; it says nothing about whether the record is true, and this
+layer produces no confidence, trust or verification value at all. Provenance
+travels unchanged - an agent claim comes back an agent claim.
+
+Retrieval cannot reach the filesystem: every candidate arrives through the store,
+so Task 009's integrity, identity and project-ownership checks apply without
+being reimplemented, and a corrupt record is reported as rejected rather than
+returned. "Found nothing" and "could not examine the corpus" are different
+answers. Nothing consumes retrieval yet - it is deliberately unwired, and the
+reasoning model receives no historical memory. See
+[docs/PHASE-010.md](docs/PHASE-010.md).
+
 Nothing writes or reads experience in the workflow yet - the store is
 deliberately unwired, and a test asserts no production module imports it. There
 is no cross-project access, no retrieval, no confidence evaluation, and no path
@@ -186,6 +208,7 @@ Tests assert each of those.
 | Document | Covers |
 | --- | --- |
 | [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why the store is deliberately unwired |
+| [docs/PHASE-010.md](docs/PHASE-010.md) | Experience retrieval: the query model, the searchable projection and what is deliberately excluded from it, the tokenizer and ranking policy, deterministic total ordering, bounds, incomplete-retrieval semantics, corruption handling, why relevance is not confidence, and why similarity search and reasoning integration are deferred |
 | [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md) | The learning foundation: ARCHITECTURE ONLY - why a lesson can inform a proposal but never authorise one, how a claim differs from a verified outcome, the three memory layers, and the roadmap to Tasks 009-014 |
 | [docs/PHASE-008.md](docs/PHASE-008.md) | Controlled repository evidence: the closed operation set, the trusted caller boundary, path and sensitive-file security, excerpt bounds, and why the model has no evidence interface |
 | [docs/PHASE-007.md](docs/PHASE-007.md) | The controlled reasoning context: provenance, authority precedence, bounds and fail-closed truncation, deterministic ordering, deduplication, and sensitive-data refusal |

@@ -426,25 +426,40 @@ describe("the foundation is architecture only", () => {
       }
     };
     walk(root);
-    // Only the store imports it by that specifier; experienceStorage.ts sits
-    // in the same directory and imports it relatively.
-    expect(importers.sort()).toEqual(["experience/experienceStore.ts"]);
+    /**
+     * UPDATED AGAIN FOR TASK 010, DELIBERATELY.
+     *
+     * The retrieval layer is the second sanctioned consumer, so the guard fired
+     * exactly as designed. The list stays EXACT: a third consumer - an
+     * evaluator, a confidence engine, a workflow node quietly writing or reading
+     * experience - still cannot appear without someone editing this line and
+     * saying why.
+     *
+     * `experienceStorage.ts` and `experienceRetrieval.ts` in `domain/` sit
+     * beside `experience.ts` and import it relatively, so they do not match this
+     * specifier.
+     */
+    expect(importers.sort()).toEqual([
+      "experience/experienceRetrieval.ts",
+      "experience/experienceStore.ts",
+    ]);
   });
 
-  it("adds no retrieval, evaluator or learning implementation", () => {
+  it("adds no evaluator or learning implementation", () => {
     /**
-     * UPDATED FOR TASK 009, DELIBERATELY.
+     * UPDATED FOR TASK 010, DELIBERATELY.
      *
-     * `experienceStore.ts` is removed from this list because Task 009 IS the
-     * store, and it was approved as persistence only. Everything else stays
-     * forbidden: retrieval is Task 010, evaluation and confidence are Task 011,
+     * `experienceRetrieval.ts` is removed because Task 010 IS retrieval, and it
+     * was approved as retrieval only. Task 009 removed `experienceStore.ts` for
+     * the same reason before it.
+     *
+     * Everything else stays forbidden: evaluation and confidence are Task 011,
      * and a learning engine is later still. Each remains a separate, separately
-     * reviewed decision.
+     * reviewed decision, and this list is what makes taking one early visible.
      */
     const root = path.resolve(__dirname, "..", "src");
     const forbidden = [
-      "learningEngine.ts", "experienceRetrieval.ts",
-      "lessonEvaluator.ts", "confidenceEngine.ts",
+      "learningEngine.ts", "lessonEvaluator.ts", "confidenceEngine.ts",
     ];
     const found: string[] = [];
     const walk = (dir: string): void => {

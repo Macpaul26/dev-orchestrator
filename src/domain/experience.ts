@@ -276,8 +276,11 @@ export type EpisodicExperience = z.infer<typeof EpisodicExperience>;
  * "yes", so no code written before the sanitisation design exists can promote a
  * lesson across a project boundary - not by mistake, and not on purpose.
  *
- * Task 010 owns that design and will have to change this line to enable it,
- * which is a visible, reviewable act.
+ * Enabling it means changing this line, which is a visible, reviewable act. No
+ * task currently owns that design. This comment used to name Task 010; Task 010
+ * turned out to be project-scoped retrieval, whose brief forbids cross-project
+ * learning outright, and a comment naming a task that is not doing the work
+ * reads as authorisation to whoever arrives next.
  */
 export const PortableLesson = z.object({
   layer: z.enum(["semantic", "procedural"]),
