@@ -440,27 +440,34 @@ describe("the foundation is architecture only", () => {
      * specifier.
      */
     expect(importers.sort()).toEqual([
+      "experience/experienceEvaluator.ts",
       "experience/experienceRetrieval.ts",
       "experience/experienceStore.ts",
     ]);
   });
 
-  it("adds no evaluator or learning implementation", () => {
+  it("adds no learning-engine implementation", () => {
     /**
-     * UPDATED FOR TASK 010, DELIBERATELY.
+     * UPDATED FOR TASK 011, DELIBERATELY.
      *
-     * `experienceRetrieval.ts` is removed because Task 010 IS retrieval, and it
-     * was approved as retrieval only. Task 009 removed `experienceStore.ts` for
-     * the same reason before it.
+     * `lessonEvaluator.ts` and `confidenceEngine.ts` are removed because Task
+     * 011 IS evaluation and confidence, and it was approved as that only. Task
+     * 009 removed `experienceStore.ts` and Task 010 removed
+     * `experienceRetrieval.ts` for the same reason before it.
      *
-     * Everything else stays forbidden: evaluation and confidence are Task 011,
-     * and a learning engine is later still. Each remains a separate, separately
-     * reviewed decision, and this list is what makes taking one early visible.
+     * BE HONEST ABOUT WHAT THIS GUARD DID AND DID NOT CATCH. Task 011's file is
+     * named `experienceEvaluator.ts`, which was never on this list, so this
+     * check would NOT have fired on it. A filename blocklist only stops the
+     * names somebody thought of in advance. The guard that actually holds the
+     * layer closed is the exact file-list assertion in experienceStore.test.ts,
+     * which enumerates every file in src/experience and so cannot be sidestepped
+     * by choosing a different name. This list is narrowed anyway rather than
+     * left to look like it is still guarding something it is not.
+     *
+     * `learningEngine.ts` stays forbidden: Task 012 and beyond.
      */
     const root = path.resolve(__dirname, "..", "src");
-    const forbidden = [
-      "learningEngine.ts", "lessonEvaluator.ts", "confidenceEngine.ts",
-    ];
+    const forbidden = ["learningEngine.ts"];
     const found: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

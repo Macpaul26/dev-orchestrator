@@ -784,7 +784,8 @@ describe("architecture boundaries", () => {
     // Grown by Task 010's retrieval layer. The list stays exact so that the
     // capability/grant/process check below covers every file in the layer.
     expect(sources.sort()).toEqual([
-      "experienceRetrieval.ts", "experienceStore.ts", "projectQuota.ts",
+      "experienceEvaluator.ts", "experienceRetrieval.ts", "experienceStore.ts",
+      "projectQuota.ts",
     ]);
 
     for (const name of sources) {

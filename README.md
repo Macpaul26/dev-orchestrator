@@ -75,19 +75,48 @@ answers. Nothing consumes retrieval yet - it is deliberately unwired, and the
 reasoning model receives no historical memory. See
 [docs/PHASE-010.md](docs/PHASE-010.md).
 
-Nothing writes or reads experience in the workflow yet - the store is
-deliberately unwired, and a test asserts no production module imports it. There
-is no cross-project access, no retrieval, no confidence evaluation, and no path
-from a model to it. See [docs/PHASE-009.md](docs/PHASE-009.md).
+**Task 011 is implemented: learning evaluation and confidence.**
+
+Given one stored experience, the evaluator assesses how strongly the rest of that
+project's history supports relying on the pattern it describes. It counts records
+under a documented policy - there is no model call, and there must never be one:
+asking the untrusted component whether its own recorded history is trustworthy
+hands the evidence standard to the thing the standard exists to check.
+
+Confidence is DERIVED, never supplied. The request carries a project and an
+experience id and nothing else, so a caller cannot attach a confidence, a
+verification flag or a trust level to be confirmed. Recurrence alone is not
+support: consistency and evidence volume both have to be high, so four successes
+with four failures scores fifty rather than eighty, and a thousand repetitions of
+one run score no higher than three. No evidence produces no score at all rather
+than a zero, because "nothing corroborates this" and "everything contradicts
+this" are different findings.
+
+Provenance is deliberately not consulted - weighting by HUMAN_DECISION would
+rebuild an authority ladder inside the evaluator, behind a number. A bounded scan
+is weighted down so it cannot claim what it did not cover. Nothing is persisted:
+the artifact sits beside the record and is never written into it. See
+[docs/PHASE-011.md](docs/PHASE-011.md).
+
+Nothing in the WORKFLOW writes or reads experience - the whole learning layer is
+deliberately unwired, and tests assert that no model, reasoning, tool, adapter or
+graph module imports any part of it. There is no cross-project access and no path
+from a model to any of it. See [docs/PHASE-009.md](docs/PHASE-009.md).
+
+(Retrieval and evaluation DO read the store - that is what Tasks 010 and 011 are.
+This paragraph previously said there was "no retrieval, no confidence
+evaluation", which stopped being true when those shipped and was corrected during
+Task 011.)
 
 **Direction: an orchestrator that learns from VERIFIED experience.**
 
 The long-term goal is a system that improves its own planning, implementation
 and verification strategy by learning from outcomes it independently verified -
-never from what an agent claimed. The foundation for that is architecture only
-today: `src/domain/experience.ts` fixes the shape, and a test asserts no
-production code imports it. There is no experience store, no retrieval and no
-confidence engine.
+never from what an agent claimed. `src/domain/experience.ts` fixes the shape;
+Task 009 built the store, Task 010 retrieval, and Task 011 evaluation and
+confidence. What does NOT exist is anything that acts on them: no adaptive
+reasoning, no strategy learning, no self-improvement, and no route from stored
+experience into a reasoning prompt.
 
 The invariant it exists to protect: **learning informs reasoning, and never
 becomes authority.** A lesson from a hundred verified runs is still text from
@@ -97,7 +126,8 @@ disable a check.
 Project-scoped experience is typed as exactly that and is NOT safe to share;
 cross-project material is a separate type that cannot carry paths, diffs or
 tokens, and cannot yet be marked eligible to cross a boundary at all. Confidence
-is read from evidence rather than stored beside it. See
+is derived by the Task 011 evaluator from the surrounding corpus, never stored
+beside the record and never supplied by a caller. See
 [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md), which states plainly
 what is guaranteed today and what is deferred.
 
@@ -209,6 +239,7 @@ Tests assert each of those.
 | --- | --- |
 | [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why the store is deliberately unwired |
 | [docs/PHASE-010.md](docs/PHASE-010.md) | Experience retrieval: the query model, the searchable projection and what is deliberately excluded from it, the tokenizer and ranking policy, deterministic total ordering, bounds, incomplete-retrieval semantics, corruption handling, why relevance is not confidence, and why similarity search and reasoning integration are deferred |
+| [docs/PHASE-011.md](docs/PHASE-011.md) | Learning evaluation and confidence: the recurrence projection and why it is not a serialization, the supporting/contradictory/neutral model, the exact confidence formula and why volume saturates, why no evidence yields no score, why provenance does not weight the result, coverage weighting, mutation results, and why the thresholds remain unvalidated |
 | [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md) | The learning foundation: ARCHITECTURE ONLY - why a lesson can inform a proposal but never authorise one, how a claim differs from a verified outcome, the three memory layers, and the roadmap to Tasks 009-014 |
 | [docs/PHASE-008.md](docs/PHASE-008.md) | Controlled repository evidence: the closed operation set, the trusted caller boundary, path and sensitive-file security, excerpt bounds, and why the model has no evidence interface |
 | [docs/PHASE-007.md](docs/PHASE-007.md) | The controlled reasoning context: provenance, authority precedence, bounds and fail-closed truncation, deterministic ordering, deduplication, and sensitive-data refusal |
