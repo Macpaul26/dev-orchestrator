@@ -74,7 +74,14 @@ beforeEach(() => {
   retrieval = new ExperienceRetrieval(store);
 });
 
-afterEach(() => { rmDir(tmp); });
+/**
+ * Cleanup gets the same allowance as the test it cleans up after. The
+ * directory-bound test below seeds 20,000 files and was given 300s for exactly
+ * that reason; leaving its cleanup on the 60s hook default was an inconsistency
+ * in that earlier change, and it fired under load - the test passed and the
+ * hook timed out removing what the test had made.
+ */
+afterEach(() => { rmDir(tmp); }, 300_000);
 
 // ===========================================================================
 describe("basic retrieval", () => {

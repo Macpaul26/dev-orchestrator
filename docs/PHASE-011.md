@@ -353,30 +353,61 @@ itself. No new storage subsystem was built, because none was needed.
 
 ## 12. Mutation testing
 
-Eight mutations, all caught, no survivors:
+### What happened, in order
 
-| Mutation | Failing tests |
-| --- | --- |
-| contradiction handling removed | 8 |
-| recurrence handling removed | 21 |
-| confidence always maximum | 14 |
-| coverage always `complete` | 2 |
-| project isolation bypassed | 26 |
-| caller-supplied fields accepted (`.strict()` dropped) | 2 |
-| evaluation made order-dependent | 3 |
-| recurrence projection becomes unrestricted serialization | 4 |
+The original eight mutation classes were validated against the first reviewed
+implementation (`c29241d`). The provenance correction (`c2b2a8d`) then changed
+the fixtures - ordinary test records became grounded by a verification result,
+because an ungrounded record can no longer vote - and added seven provenance
+mutations. **The original eight were not re-run at that point.** The correction
+commit said so rather than implying otherwise, and independent review correctly
+declined to accept the suite until they were.
 
-Seven more after the admissibility correction, all caught, no survivors:
+They have now been reworked against the corrected implementation and fixtures,
+and run alongside the seven. Two were re-thought rather than merely re-anchored:
 
-| Mutation | Failing tests |
-| --- | --- |
-| admissibility gate removed | 8 |
-| `AGENT_CLAIM` made admissible | 8 |
-| `PROCESS_OBSERVATION` made admissible | 3 |
-| `HUMAN_DECISION` given a ×2 multiplier | 2 |
-| provenance ignored in classification | 8 |
-| inadmissible records counted as supporting | 8 |
-| inadmissible records counted as contradicting | 8 |
+- **Order dependence.** The original mutation capped contradictions at one - a
+  *count* defect, and a suite that catches it proves nothing about order. The
+  replacement counts support only while no contradiction has yet been seen, so
+  `S,S,C` and `C,S,S` genuinely tally differently. Only a real order-independence
+  test can catch that.
+- **Serialized identity.** The original randomised the reported key. Since the
+  cohort-model correction (§4) the key no longer selects the cohort, so that
+  mutation had become cosmetic. The replacement makes cohort membership depend
+  on `runId` - which is what "identity depends on the whole record" actually
+  does to recurrence: every record becomes unique and it vanishes. The key-only
+  variant is kept as a second case so the reported artifact is covered too.
+
+### Results against the corrected implementation
+
+A mutation counts as **caught** only when vitest exits non-zero *and* the
+summary reports failures; either alone is recorded as survived. Source is diffed
+against its backup after every mutation and once more at the end.
+
+| # | Mutation | Failing tests (of 70) |
+| --- | --- | --- |
+| 1 | contradiction handling removed | 10 |
+| 2 | recurrence handling removed | 32 |
+| 3 | confidence forced to maximum | 22 |
+| 4 | coverage forced to `complete` | 2 |
+| 5 | project isolation bypassed | 39 |
+| 6 | caller-supplied fields accepted (`.strict()` dropped) | 2 |
+| 7 | evaluation made order-dependent | 5 |
+| 8 | cohort identity depends on `runId` | 32 |
+| 8b | recurrence key becomes unrestricted serialization | 5 |
+| P1 | admissibility gate removed | 8 |
+| P2 | `AGENT_CLAIM` made admissible | 8 |
+| P3 | `PROCESS_OBSERVATION` made admissible | 3 |
+| P4 | `HUMAN_DECISION` given a ×2 multiplier | 2 |
+| P5 | provenance ignored in classification | 8 |
+| P6 | inadmissible records counted as supporting | 8 |
+| P7 | inadmissible records counted as contradicting | 8 |
+
+Sixteen cases. All caught. No survivors. Source pristine after the run.
+
+The numbers differ from the `c29241d` table because the suite grew from 55 to
+70 tests and the fixtures changed shape; they are not comparable across the two
+implementations and are not presented as such.
 
 ---
 

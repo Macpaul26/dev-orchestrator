@@ -151,7 +151,14 @@ beforeEach(() => {
   store = new ExperienceStore(tmp);
 });
 
-afterEach(() => { rmDir(tmp); });
+/**
+ * Cleanup gets the same allowance as the tests it cleans up after. Several
+ * suites here seed thousands of files, and removing them is dominated by the
+ * host filesystem rather than by anything under test - measured at ~10s idle
+ * and past the 60s hook default under load. A cleanup limit tighter than the
+ * test's own limit reports ordinary background load as a product defect.
+ */
+afterEach(() => { rmDir(tmp); }, 300_000);
 
 // ===========================================================================
 describe("the directory scan is bounded at the READ, not afterwards", () => {
@@ -308,7 +315,13 @@ describe("the quota holds across concurrent OS processes", () => {
       const locks = path.join(dir, ProjectLock.directoryName());
       expect(fs.existsSync(locks) ? fs.readdirSync(locks) : []).toEqual([]);
     }
-  }, 110_000);
+    /**
+     * Three rounds of seeding 4,999 files and spawning six processes. Measured
+     * at ~30s idle and 157s under heavy external load, with no assertion
+     * failing in either - the cost is filesystem and process creation, not the
+     * lock. Same allowance as the directory-bound test, for the same reason.
+     */
+  }, 300_000);
 
   it("serialises two processes inside the critical section, provably", async () => {
     /**
