@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import {
+  INDEPENDENT_SOURCES,
   type EpisodicExperience as TEpisodicExperience,
+  type OutcomeSource,
 } from "../domain/experience.js";
 import {
   EvaluationRequest, EvaluationArtifact, EvaluationFailure, EVALUATION_LIMITS,
@@ -10,6 +12,7 @@ import {
   type ConfidenceAssessment as TConfidenceAssessment,
   type EvaluationStatus as TEvaluationStatus,
   type EvaluationStopReason,
+  type RecurrenceRelation as TRecurrenceRelation,
 } from "../domain/experienceEvaluation.js";
 import { type ExperienceDefect as TExperienceDefect } from "../domain/experienceStorage.js";
 import type { ExperienceStore } from "./experienceStore.js";
@@ -168,6 +171,58 @@ function comparable(record: TEpisodicExperience, taskType: string): boolean {
 }
 
 /**
+ * THE EVIDENCE ADMISSIBILITY POLICY.
+ *
+ * ---------------------------------------------------------------------------
+ * ADMISSIBILITY IS NOT AUTHORITY - CORRECTED AFTER REVIEW
+ * ---------------------------------------------------------------------------
+ * The first version consulted `sources` nowhere, reasoning that a rule like
+ * "HUMAN_DECISION corroborates more strongly" would rebuild an authority ladder
+ * inside the score. That half was right and is still true: nothing here weights
+ * a vote by who cast it.
+ *
+ * The other half was a defect. Ignoring provenance entirely meant three
+ * repeated AGENT_CLAIM records scored 100 - repetition of an unsupported claim
+ * was manufacturing confidence, which is the exact thing Task 008-A's
+ * `INDEPENDENT_SOURCES` was written to prevent. Independent review caught it.
+ *
+ * So provenance answers ONE question here, and it is a yes-or-no question: is
+ * this record's recorded outcome backed by anything other than the agent's own
+ * say-so? If yes, it may vote, and it counts exactly once. If no, it may not.
+ *
+ * The policy, per source, using the definitions in domain/experience.ts:
+ *
+ *   AGENT_CLAIM             INADMISSIBLE. "The agent said so. Evidence of
+ *                           nothing." Repeating it any number of times does not
+ *                           change what it is.
+ *   PROCESS_OBSERVATION     INADMISSIBLE for an outcome claim. An exit code
+ *                           says a program finished, not that the approach the
+ *                           record describes worked or failed. experience.ts
+ *                           excludes it from INDEPENDENT_SOURCES for that
+ *                           reason, and this policy does not promote it.
+ *   REPOSITORY_OBSERVATION  admissible - the orchestrator looked itself.
+ *   VERIFICATION_RESULT     admissible - a configured check actually ran.
+ *   REVIEW_FINDING          admissible - the deterministic review layer.
+ *   HUMAN_DECISION          admissible - a person recorded the outcome. It is
+ *                           admissible EVIDENCE about what happened; it is not
+ *                           a multiplier, and it authorises nothing here.
+ *
+ * `ADMISSIBLE_SOURCES` IS `INDEPENDENT_SOURCES` by reference, not a copy. The
+ * set is defined once, in the domain, and reused here so the evaluator cannot
+ * drift from the meaning the foundation assigned to each source.
+ *
+ * Granularity: `sources` is recorded per RECORD, so admissibility is decided per
+ * record. A record grounded by a verification result is admissible for every
+ * outcome it recorded. Finer attribution would need per-outcome provenance,
+ * which the schema does not carry. Recorded as a known limitation.
+ */
+const ADMISSIBLE_SOURCES: ReadonlySet<OutcomeSource> = new Set(INDEPENDENT_SOURCES);
+
+function admissible(record: TEpisodicExperience): boolean {
+  return record.sources.some((source) => ADMISSIBLE_SOURCES.has(source));
+}
+
+/**
  * HOW ONE COHORT RECORD RELATES TO THE SUBJECT'S APPROACHES.
  *
  * A record contradicts if it lists ANY of the subject's approaches among what
@@ -176,39 +231,46 @@ function comparable(record: TEpisodicExperience, taskType: string): boolean {
  * approach failed is evidence against relying on it, and letting a partial
  * success elsewhere in the same record cancel that out would hide the finding.
  *
- * ---------------------------------------------------------------------------
- * PROVENANCE IS DELIBERATELY NOT CONSULTED
- * ---------------------------------------------------------------------------
- * `sources` plays no part in this classification, and that is a decision rather
- * than an omission. A rule like "HUMAN_DECISION corroborates more strongly"
- * would rebuild an authority ladder inside the evaluator - the exact structure
- * the learning architecture keeps out of the trust path - and it would do so
- * where it is hardest to see, behind a number. A record's provenance travels
- * with the record for a human to weigh; it does not silently weight a score.
+ * Then the gate. A record with an outcome to report - it would have supported
+ * or contradicted - that is not admissible is classified `inadmissible`, not
+ * `neutral`: it is not silent, it is unsupported, and the artifact reports the
+ * two separately. A record silent on the approach is `neutral` regardless of
+ * its provenance, because admissibility is moot for a record with nothing to
+ * say.
  */
 function relate(
   record: TEpisodicExperience, approaches: ReadonlySet<string>,
-): "supporting" | "contradicting" | "neutral" {
-  let supports = false;
+): TRecurrenceRelation {
+  let outcome: "supporting" | "contradicting" | "neutral" = "neutral";
   for (const raw of record.failedPatterns) {
-    if (approaches.has(normalizePattern(raw))) return "contradicting";
+    if (approaches.has(normalizePattern(raw))) { outcome = "contradicting"; break; }
   }
-  for (const raw of record.successfulPatterns) {
-    if (approaches.has(normalizePattern(raw))) supports = true;
+  if (outcome === "neutral") {
+    for (const raw of record.successfulPatterns) {
+      if (approaches.has(normalizePattern(raw))) { outcome = "supporting"; break; }
+    }
   }
-  return supports ? "supporting" : "neutral";
+  if (outcome === "neutral") return "neutral";
+  return admissible(record) ? outcome : "inadmissible";
 }
 
 /**
  * THE CONFIDENCE POLICY.
  *
- *     n            = supporting + contradicting          (records that voted)
+ *     n            = supporting + contradicting          ADMISSIBLE voters only
  *     consistency  = floor(100 * supporting / n)         how one-sided they are
  *     volume       = floor(100 * min(n, V) / V)          how much evidence there is
  *     raw          = floor(consistency * volume / 100)
  *     score        = complete ? raw : floor(raw * W / 100)
  *
  * with V = `volumeSaturation` and W = `boundedCoverageWeight`.
+ *
+ * `supporting` and `contradicting` count only records that passed the
+ * admissibility gate in `relate`. Inadmissible records are counted separately
+ * and reach this function in no form - not as a fractional weight, not as a
+ * zero-weighted term, not at all. The formula is unchanged from the reviewed
+ * version; what changed is the population it operates over, and that change
+ * lives in the classification so the arithmetic stays legible.
  *
  * ---------------------------------------------------------------------------
  * WHY TWO FACTORS RATHER THAN A COUNT
@@ -335,6 +397,7 @@ export class ExperienceEvaluator {
     let supporting = 0;
     let contradicting = 0;
     let neutral = 0;
+    let inadmissible = 0;
     let cohort = 0;
     let examined = 0;
     let comparisons = 0;
@@ -390,11 +453,21 @@ export class ExperienceEvaluator {
         if (!comparable(stored.record, taskType)) continue;
 
         cohort += 1;
+        /**
+         * Four relations, and only the first two reach the score. Inadmissible
+         * records are examined (they cost coverage budget like any other), are
+         * part of the cohort (they are comparable runs), and are tallied - but
+         * they cast no vote in either direction. Their presence does not make
+         * the scan less complete: the corpus WAS examined; the corpus simply
+         * contained claims nothing independent backs.
+         */
         const relation = relate(stored.record, approachSet);
         if (relation === "supporting") {
           if (supporting < EVALUATION_LIMITS.maxCountedRecurrences) supporting += 1;
         } else if (relation === "contradicting") {
           if (contradicting < EVALUATION_LIMITS.maxCountedRecurrences) contradicting += 1;
+        } else if (relation === "inadmissible") {
+          if (inadmissible < EVALUATION_LIMITS.maxCountedRecurrences) inadmissible += 1;
         } else if (neutral < EVALUATION_LIMITS.maxCountedRecurrences) {
           neutral += 1;
         }
@@ -423,7 +496,7 @@ export class ExperienceEvaluator {
         recurrence: {
           key,
           cohort: Math.min(cohort, EVALUATION_LIMITS.maxCountedRecurrences),
-          supporting, contradicting, neutral,
+          supporting, contradicting, neutral, inadmissible,
         },
         confidence,
         status: statusFor(confidence),

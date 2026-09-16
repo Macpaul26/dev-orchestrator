@@ -107,15 +107,43 @@ export type EvaluationRequest = z.infer<typeof EvaluationRequest>;
 /**
  * HOW A COHORT RECORD RELATES TO THE PATTERN BEING EVALUATED.
  *
- *   supporting     it recorded the same approach among what SUCCEEDED
- *   contradicting  it recorded the same approach among what FAILED
- *   neutral        it shares the pattern's identity but recorded no outcome
- *                  for it either way
+ *   supporting     it recorded the same approach among what SUCCEEDED, and
+ *                  that outcome is admissible evidence
+ *   contradicting  it recorded the same approach among what FAILED, and that
+ *                  outcome is admissible evidence
+ *   neutral        it is comparable but recorded no outcome for this approach
+ *                  either way
+ *   inadmissible   it recorded an outcome for this approach - it WOULD have
+ *                  supported or contradicted - but nothing independent of the
+ *                  agent backs that outcome, so it may not vote
  *
- * `neutral` exists so that "we have seen this before" and "this worked before"
- * stay separate facts. Recurrence alone is not support.
+ * ---------------------------------------------------------------------------
+ * WHY `inadmissible` IS NOT `neutral` - CORRECTED AFTER REVIEW
+ * ---------------------------------------------------------------------------
+ * The first version had no admissibility gate at all: it ignored `sources` on
+ * the grounds that weighting by provenance would build an authority ladder
+ * inside the score. That reasoning was half right. Provenance must not WEIGHT a
+ * vote - but it does decide whether there is a vote to count, and skipping that
+ * question let three repeated agent claims score 100. Independent review caught
+ * it: repetition of an unsupported claim was manufacturing confidence, which is
+ * precisely what Task 008-A's `INDEPENDENT_SOURCES` exists to prevent.
+ *
+ * `neutral` and `inadmissible` are therefore different facts and are reported
+ * separately. A neutral record has nothing to say about the approach. An
+ * inadmissible record HAS something to say and is not allowed to say it in the
+ * tally - and a reader deserves to know how many such records exist, because a
+ * pattern with forty inadmissible supporters and no admissible ones is a
+ * pattern the agent keeps asserting and nothing has ever confirmed.
+ *
+ *     EVIDENCE ADMISSIBILITY  !=  AUTHORITY
+ *
+ * Admissibility is binary. An admissible record counts exactly once whatever
+ * its source, so a human decision and a verification result corroborate
+ * identically. See `ADMISSIBLE_SOURCES` in the evaluator.
  */
-export const RecurrenceRelation = z.enum(["supporting", "contradicting", "neutral"]);
+export const RecurrenceRelation = z.enum([
+  "supporting", "contradicting", "neutral", "inadmissible",
+]);
 export type RecurrenceRelation = z.infer<typeof RecurrenceRelation>;
 
 /**
@@ -127,14 +155,24 @@ export type RecurrenceRelation = z.infer<typeof RecurrenceRelation>;
  * The subject NEVER counts towards its own tally. An experience is not evidence
  * for itself, and letting it corroborate itself would mean a single record
  * could reach the same score as a genuinely repeated one.
+ *
+ * ONLY `supporting` AND `contradicting` VOTE. `neutral` and `inadmissible` are
+ * reported so the reader can see the shape of the corpus, and contribute nothing
+ * to the score. `cohort` counts all four, so it answers "how many comparable
+ * runs exist", not "how many were counted".
  */
 export const RecurrenceTally = z.object({
   key: z.string().regex(/^[0-9a-f]{32}$/, "a recurrence key is 32 lower-case hex characters"),
-  /** Records sharing the pattern's identity, excluding the subject. */
+  /** Comparable records, excluding the subject. Includes every relation below. */
   cohort: z.number().int().nonnegative(),
+  /** Admissible records whose outcome corroborates the approach. VOTES. */
   supporting: z.number().int().nonnegative(),
+  /** Admissible records whose outcome contradicts the approach. VOTES. */
   contradicting: z.number().int().nonnegative(),
+  /** Comparable records silent on this approach. Does not vote. */
   neutral: z.number().int().nonnegative(),
+  /** Records with an outcome for this approach that nothing independent backs. Does not vote. */
+  inadmissible: z.number().int().nonnegative(),
 }).strict();
 export type RecurrenceTally = z.infer<typeof RecurrenceTally>;
 

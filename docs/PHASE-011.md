@@ -23,9 +23,11 @@ ExperienceStore.list()      bounded paging; Task 009 checks every record
       ▼
 comparable population       same task type, excluding the subject
       │
-      ├── supporting        recorded the approach among what SUCCEEDED
-      ├── contradicting     recorded the approach among what FAILED
-      └── neutral           comparable, but silent on this approach
+      ├── supporting        recorded the approach among what SUCCEEDED — admissible
+      ├── contradicting     recorded the approach among what FAILED — admissible
+      ├── neutral           comparable, but silent on this approach
+      └── inadmissible      has an outcome for this approach, but nothing
+                            independent of the agent backs it — cannot vote
       │
       ▼
 confidence + coverage       ← Task 011 stops here
@@ -119,7 +121,7 @@ projection: explicit projection beats accidental serialization.
 ## 5. The confidence formula
 
 ```
-n            = supporting + contradicting          records that actually voted
+n            = supporting + contradicting          ADMISSIBLE voters only
 consistency  = floor(100 × supporting / n)         how one-sided they are
 volume       = floor(100 × min(n, V) / V)          how much evidence there is
 raw          = floor(consistency × volume / 100)
@@ -129,6 +131,13 @@ score        = complete ? raw : floor(raw × W / 100)
 with `V = volumeSaturation (3)` and `W = boundedCoverageWeight (60)`.
 Integer arithmetic throughout — no floating-point accumulation, so identical
 inputs give a bit-identical score on any machine.
+
+`supporting` and `contradicting` count only records that passed the
+admissibility gate (§6). Inadmissible records reach the formula in **no form** —
+not as a fractional weight, not as a zero-weighted term, not at all. The formula
+is unchanged from the first reviewed version; what changed is the population it
+operates over, and that change lives in the classification so the arithmetic
+stays legible.
 
 ### Why two factors rather than a count
 
@@ -145,6 +154,7 @@ answers "how many times did we try?". **Both** must be high.
 | 4 | 4 | 50 |
 | 0 | 4 | 0 — `contradicted` |
 | 60 | 30 | 66 |
+| 3 agent claims, 0 admissible | — | *no score* — `insufficient_evidence` |
 
 Four-and-four is fifty, not eighty — the same eight records a pure count would
 have treated as strong evidence. Volume **saturates**, so a thousand repetitions
@@ -177,17 +187,78 @@ anything, and the weights are policy choices rather than measurements.
 
 ---
 
-## 6. Provenance is deliberately not consulted
+## 6. Provenance gates evidence — and grants nothing
 
-`sources` plays no part in the classification or the score. A rule like
-"`HUMAN_DECISION` corroborates more strongly" would rebuild an **authority
-ladder inside the evaluator** — the exact structure the learning architecture
-keeps out of the trust path — and it would do so where it is hardest to see,
-behind a number.
+> **Corrected after independent review.** The first version of this section
+> said "`sources` plays no part in classification or the score", and the
+> evaluator did exactly that. The reasoning was half right: weighting a vote by
+> its source would rebuild an authority ladder inside the score, and that is
+> still forbidden. But ignoring provenance *entirely* meant three repeated
+> `AGENT_CLAIM` records scored 100 — repetition of an unsupported claim was
+> manufacturing confidence, which is the exact thing Task 008-A's
+> `INDEPENDENT_SOURCES` exists to prevent.
 
-A record's provenance travels with the record for a human to weigh. It does not
-silently weight a score. A test asserts an agent-claimed corpus and a
-human-decided corpus produce the **identical** confidence.
+The distinction the correction introduces:
+
+```
+EVIDENCE ADMISSIBILITY  ≠  AUTHORITY
+REPETITION              ≠  INDEPENDENT CORROBORATION
+```
+
+Provenance answers **one** question, and it is a yes-or-no question: *is this
+record's recorded outcome backed by anything other than the agent's own
+say-so?* If yes, the record may vote, and it counts **exactly once**. If no, it
+may not vote at all. Nothing here weights a vote by who cast it.
+
+### The admissibility table
+
+The set is `INDEPENDENT_SOURCES` from `experience.ts`, **by reference** — not a
+second copy that could drift from what the foundation assigned each source.
+
+| Source | Admissible? | Why |
+| --- | --- | --- |
+| `AGENT_CLAIM` | **no** | "The agent said so. Evidence of nothing." Repeating it any number of times does not change what it is. |
+| `PROCESS_OBSERVATION` | **no** | An exit code says a program finished, not that the approach the record describes worked or failed. `experience.ts` excludes it from `INDEPENDENT_SOURCES` for that reason, and this policy does not promote it. |
+| `REPOSITORY_OBSERVATION` | yes | The orchestrator looked itself. |
+| `VERIFICATION_RESULT` | yes | A configured check actually ran. |
+| `REVIEW_FINDING` | yes | The deterministic review layer produced it. |
+| `HUMAN_DECISION` | yes | A person recorded the outcome. Admissible **evidence** about what happened — not a multiplier, and it authorises nothing here. |
+
+A record is admissible if **any** of its sources is admissible: `sources` is
+recorded per record, so a record carrying an agent claim *and* a verification
+result is grounded by the check, and the claim beside it does not un-ground it.
+
+### What this does to the counts
+
+| Relation | Outcome recorded for the approach? | Admissible? | Votes? |
+| --- | --- | --- | --- |
+| `supporting` | yes — succeeded | yes | **yes** |
+| `contradicting` | yes — failed | yes | **yes** |
+| `neutral` | no | *moot* | no |
+| `inadmissible` | yes | **no** | no |
+
+`neutral` and `inadmissible` are different facts and are reported separately. A
+neutral record has nothing to say. An inadmissible record *has* something to say
+and is not allowed to say it in the tally — and a reader deserves to know how
+many such records exist, because forty inadmissible supporters and no admissible
+ones is a pattern the agent keeps asserting and nothing has ever confirmed.
+
+`cohort` counts all four relations; `examined` counts every record read. An
+inadmissible record does not make the scan less complete — the corpus *was*
+examined; it simply contained claims nothing independent backs.
+
+### What it must never become
+
+- `HUMAN_DECISION` does not approve, widen scope, grant capability, or score
+  higher for being human. A test asserts a human decision and a verification
+  result produce the identical score, and that one human decision cannot outvote
+  two contradicting verification results.
+- `AGENT_CLAIM` cannot manufacture confidence by repetition — in **either**
+  direction. Three agent claims that an approach failed are no more a
+  contradiction signal than three claims it worked are a support signal.
+- The policy is **not empirically validated.** It inherits the source semantics
+  the foundation defined; whether those semantics predict outcomes is a question
+  no corpus yet exists to answer.
 
 ---
 
@@ -295,6 +366,18 @@ Eight mutations, all caught, no survivors:
 | evaluation made order-dependent | 3 |
 | recurrence projection becomes unrestricted serialization | 4 |
 
+Seven more after the admissibility correction, all caught, no survivors:
+
+| Mutation | Failing tests |
+| --- | --- |
+| admissibility gate removed | 8 |
+| `AGENT_CLAIM` made admissible | 8 |
+| `PROCESS_OBSERVATION` made admissible | 3 |
+| `HUMAN_DECISION` given a ×2 multiplier | 2 |
+| provenance ignored in classification | 8 |
+| inadmissible records counted as supporting | 8 |
+| inadmissible records counted as contradicting | 8 |
+
 ---
 
 ## 13. The unvalidated thresholds — stated, not settled
@@ -339,6 +422,10 @@ their *values* are not measurements and are not presented as any.
 
 ## 15. Known limitations
 
+0. **Admissibility is per record, not per outcome.** `sources` is recorded
+   once per experience, so a record grounded by a verification result is
+   admissible for every outcome it recorded. Finer attribution would need
+   per-outcome provenance, which the schema does not carry.
 1. **The outcome signal is the pattern lists only.** A record that recorded no
    approach contributes to the comparable population but can neither support nor
    contradict. Projects that never populate `successfulPatterns` /
@@ -369,6 +456,7 @@ any one of them without touching the request shape, the bounds, the coverage
 reporting, the corruption handling or the isolation guarantee.
 
 What must **not** change without a separate, reviewed decision: that confidence
-is derived rather than supplied, that provenance does not weight the score, that
+is derived rather than supplied, that provenance gates admissibility but never
+weights a vote, that an agent claim cannot vote however often it is repeated, that
 a bounded scan cannot score like a complete one, and that no model participates
 in evaluating the system's own memory.

@@ -64,17 +64,35 @@ function write(projectId: string, overrides: Record<string, unknown> = {}): stri
   return result.id;
 }
 
+/**
+ * Fixtures carry INDEPENDENT provenance by default. After the admissibility
+ * correction a record backed only by the agent's say-so cannot vote, so the
+ * ordinary fixtures below are grounded by a verification result - the
+ * inadmissible cases are constructed explicitly, by name, in the provenance
+ * suite.
+ */
+const GROUNDED = ["VERIFICATION_RESULT"];
+
 /** The subject under evaluation: succeeded with approach "cache warming". */
 function subject(projectId = "alpha"): string {
-  return write(projectId, { successfulPatterns: ["cache warming"] });
+  return write(projectId, { successfulPatterns: ["cache warming"], sources: GROUNDED });
 }
 
-function supportRecord(projectId = "alpha"): string {
-  return write(projectId, { successfulPatterns: ["cache warming"] });
+function supportRecord(projectId = "alpha", sources: string[] = GROUNDED): string {
+  return write(projectId, { successfulPatterns: ["cache warming"], sources });
 }
 
-function contradictRecord(projectId = "alpha"): string {
-  return write(projectId, { failedPatterns: ["cache warming"] });
+function contradictRecord(projectId = "alpha", sources: string[] = GROUNDED): string {
+  return write(projectId, { failedPatterns: ["cache warming"], sources });
+}
+
+/** Start over with an empty store, for side-by-side corpus comparisons. */
+function fresh(): void {
+  rmDir(tmp);
+  tmp = tmpDir("orch-eval-");
+  store = new ExperienceStore(tmp);
+  evaluator = new ExperienceEvaluator(store);
+  sequence = 0;
 }
 
 function evaluate(request: unknown) {
@@ -219,7 +237,7 @@ describe("recurrence", () => {
      */
     const id = subject();
     write("alpha", {
-      successfulPatterns: ["cache warming"],
+      successfulPatterns: ["cache warming"], sources: GROUNDED,
       runId: "totally-different-run",
       createdAt: "2020-01-01T00:00:00.000Z",
       evidence: [{ source: "VERIFICATION_RESULT", ref: "check:typecheck" }],
@@ -273,14 +291,15 @@ describe("recurrence", () => {
     expect(found.recurrence.cohort).toBe(2);
     expect(found.recurrence.supporting).toBe(1);
     expect(found.recurrence.neutral).toBe(1);
+    expect(found.recurrence.inadmissible).toBe(0);
     // The silent record did not raise the score: two comparable runs, one vote.
     expect(found.confidence).toEqual({ kind: "assessed", score: 33 });
   });
 
   it("normalizes case, punctuation and compatibility forms", () => {
     const id = subject();
-    write("alpha", { successfulPatterns: ["Cache-Warming!"] });
-    write("alpha", { successfulPatterns: ["ｃａｃｈｅ　ｗａｒｍｉｎｇ"] });
+    write("alpha", { successfulPatterns: ["Cache-Warming!"], sources: GROUNDED });
+    write("alpha", { successfulPatterns: ["ｃａｃｈｅ　ｗａｒｍｉｎｇ"], sources: GROUNDED });
 
     expect(artifact("alpha", id).recurrence.supporting).toBe(2);
   });
@@ -374,6 +393,7 @@ describe("supporting, contradictory and mixed outcomes", () => {
     write("alpha", {
       successfulPatterns: ["cache warming", "connection pooling"],
       failedPatterns: ["cache warming"],
+      sources: GROUNDED,
     });
 
     const found = artifact("alpha", id);
@@ -744,42 +764,41 @@ describe("evaluation is not authority", () => {
     expect(score("alpha", id)).toBe(0);
   });
 
-  it("does not let a provenance label move the score", () => {
+  it("gives every ADMISSIBLE source the same vote - no authority multiplier", () => {
     /**
-     * A record decided by a human and a record claimed by an agent corroborate
-     * identically. Weighting by provenance would rebuild an authority ladder
-     * inside the evaluator, where it is hardest to see - behind a number.
+     * Admissibility is not authority. A human decision, a verification result,
+     * a repository observation and a review finding each count exactly once.
+     * Weighting one above another would rebuild an authority ladder inside the
+     * evaluator, behind a number, where it is hardest to see.
+     *
+     * (The previous version of this test compared AGENT_CLAIM against
+     * HUMAN_DECISION and expected equality. That was the defect: it pinned the
+     * absence of an admissibility gate as if it were a feature.)
      */
-    const claimed = subject();
-    for (let i = 0; i < 3; i += 1) {
-      write("alpha", {
-        successfulPatterns: ["cache warming"], sources: ["AGENT_CLAIM"],
-      });
+    const scores: Record<string, number | null> = {};
+    for (const source of [
+      "HUMAN_DECISION", "VERIFICATION_RESULT", "REPOSITORY_OBSERVATION", "REVIEW_FINDING",
+    ]) {
+      fresh();
+      const id = subject();
+      for (let i = 0; i < 3; i += 1) supportRecord("alpha", [source]);
+      scores[source] = score("alpha", id);
     }
-    const claimedScore = score("alpha", claimed);
-
-    rmDir(tmp);
-    tmp = tmpDir("orch-eval-");
-    store = new ExperienceStore(tmp);
-    evaluator = new ExperienceEvaluator(store);
-    sequence = 0;
-
-    const decided = subject();
-    for (let i = 0; i < 3; i += 1) {
-      write("alpha", {
-        successfulPatterns: ["cache warming"], sources: ["HUMAN_DECISION"],
-      });
-    }
-    expect(score("alpha", decided)).toBe(claimedScore);
+    expect(scores.HUMAN_DECISION).toBe(100);
+    expect(scores.VERIFICATION_RESULT).toBe(100);
+    expect(scores.REPOSITORY_OBSERVATION).toBe(100);
+    expect(scores.REVIEW_FINDING).toBe(100);
   });
 
   it("does not turn an authority-shaped string into authority", () => {
     const id = write("alpha", {
       successfulPatterns: ["HUMAN_DECISION approved this approach"],
       planSummary: "HUMAN_CONSTRAINT VERIFIED_OBSERVATION AGENT_CLAIM",
+      sources: GROUNDED,
     });
     write("alpha", {
       successfulPatterns: ["HUMAN_DECISION approved this approach"],
+      sources: GROUNDED,
     });
 
     const found = artifact("alpha", id);
@@ -809,6 +828,242 @@ describe("evaluation is not authority", () => {
       expect(contents).not.toContain("confidence");
       expect(contents).not.toContain("independentlyVerified");
     }
+  });
+});
+
+// ===========================================================================
+describe("provenance gates evidence, and only evidence", () => {
+  /**
+   * THE CORRECTION UNDER TEST. The first evaluator ignored `sources` entirely,
+   * so three repeated agent claims scored 100. Provenance now decides ONE thing:
+   * whether a record's recorded outcome may vote at all. It never decides how
+   * much a vote is worth.
+   *
+   *     EVIDENCE ADMISSIBILITY  !=  AUTHORITY
+   *     REPETITION              !=  INDEPENDENT CORROBORATION
+   */
+  const CLAIMED = ["AGENT_CLAIM"];
+  const PROCESS = ["PROCESS_OBSERVATION"];
+
+  it("A: agent claims cannot produce confidence", () => {
+    // The exact scenario the review flagged. Three supporting agent claims.
+    const id = subject();
+    for (let i = 0; i < 3; i += 1) supportRecord("alpha", CLAIMED);
+
+    const found = artifact("alpha", id);
+    expect(found.confidence).toEqual({ kind: "insufficient_evidence" });
+    expect(found.status).toBe("insufficient_evidence");
+    expect(found.recurrence.supporting).toBe(0);
+    expect(found.recurrence.inadmissible).toBe(3);
+  });
+
+  it("B: repeating agent claims does not increase confidence", () => {
+    const id = subject();
+    for (let i = 0; i < 40; i += 1) supportRecord("alpha", CLAIMED);
+
+    const found = artifact("alpha", id);
+    expect(found.confidence).toEqual({ kind: "insufficient_evidence" });
+    expect(found.recurrence.inadmissible).toBe(40);
+    // Reported, so a reader can see a pattern the agent keeps asserting and
+    // nothing has ever confirmed - which is a finding in itself.
+    expect(found.recurrence.cohort).toBe(40);
+  });
+
+  it("C: replacing agent claims with admissible evidence raises the score", () => {
+    const id = subject();
+    for (let i = 0; i < 3; i += 1) supportRecord("alpha", CLAIMED);
+    expect(score("alpha", id)).toBeNull();
+
+    fresh();
+    const grounded = subject();
+    for (let i = 0; i < 3; i += 1) supportRecord("alpha", ["REPOSITORY_OBSERVATION"]);
+    expect(score("alpha", grounded)).toBe(100);
+  });
+
+  it("D: a human decision receives no numeric multiplier", () => {
+    const human = subject();
+    supportRecord("alpha", ["HUMAN_DECISION"]);
+    const humanScore = score("alpha", human);
+
+    fresh();
+    const checked = subject();
+    supportRecord("alpha", ["VERIFICATION_RESULT"]);
+    expect(score("alpha", checked)).toBe(humanScore);
+
+    // And one human decision is one vote: it cannot outweigh two contradicting
+    // verification results by virtue of being human.
+    fresh();
+    const outvoted = subject();
+    supportRecord("alpha", ["HUMAN_DECISION"]);
+    contradictRecord("alpha", ["VERIFICATION_RESULT"]);
+    contradictRecord("alpha", ["VERIFICATION_RESULT"]);
+    expect(score("alpha", outvoted)).toBe(33);
+  });
+
+  it("E: identical outcomes with different provenance follow the documented table", () => {
+    const expectations: Array<[string, boolean]> = [
+      ["AGENT_CLAIM", false],
+      ["PROCESS_OBSERVATION", false],
+      ["REPOSITORY_OBSERVATION", true],
+      ["VERIFICATION_RESULT", true],
+      ["REVIEW_FINDING", true],
+      ["HUMAN_DECISION", true],
+    ];
+    for (const [source, admissible] of expectations) {
+      fresh();
+      const id = subject();
+      supportRecord("alpha", [source]);
+      const found = artifact("alpha", id);
+      expect(found.recurrence.supporting, source).toBe(admissible ? 1 : 0);
+      expect(found.recurrence.inadmissible, source).toBe(admissible ? 0 : 1);
+    }
+  });
+
+  it("F: a process observation is not promoted to independent verification", () => {
+    /**
+     * An exit code says a program finished. It does not say the approach the
+     * record describes worked. experience.ts excludes PROCESS_OBSERVATION from
+     * INDEPENDENT_SOURCES for exactly that reason, and the evaluator inherits
+     * the exclusion rather than quietly relaxing it.
+     */
+    const id = subject();
+    for (let i = 0; i < 3; i += 1) supportRecord("alpha", PROCESS);
+
+    const found = artifact("alpha", id);
+    expect(found.confidence).toEqual({ kind: "insufficient_evidence" });
+    expect(found.recurrence.inadmissible).toBe(3);
+  });
+
+  it("G: contradicting agent claims cannot manufacture a contradiction signal either", () => {
+    // Symmetry matters. An agent saying "this failed" three times is no more
+    // evidence than an agent saying "this worked" three times.
+    const id = subject();
+    for (let i = 0; i < 3; i += 1) contradictRecord("alpha", CLAIMED);
+
+    const found = artifact("alpha", id);
+    expect(found.confidence).toEqual({ kind: "insufficient_evidence" });
+    expect(found.status).not.toBe("contradicted");
+    expect(found.recurrence.contradicting).toBe(0);
+    expect(found.recurrence.inadmissible).toBe(3);
+  });
+
+  it("H: a mixed corpus counts only its admissible votes", () => {
+    const id = subject();
+    supportRecord("alpha", ["VERIFICATION_RESULT"]);
+    supportRecord("alpha", ["VERIFICATION_RESULT"]);
+    supportRecord("alpha", CLAIMED);
+    supportRecord("alpha", CLAIMED);
+    supportRecord("alpha", CLAIMED);
+    contradictRecord("alpha", ["REVIEW_FINDING"]);
+    contradictRecord("alpha", CLAIMED);
+    write("alpha", { successfulPatterns: ["unrelated approach"], sources: CLAIMED });
+
+    const found = artifact("alpha", id);
+    expect(found.recurrence).toEqual({
+      key: found.recurrence.key,
+      cohort: 8,
+      supporting: 2,
+      contradicting: 1,
+      neutral: 1,
+      inadmissible: 4,
+    });
+    // n = 3 admissible voters: consistency 66, volume 100, raw 66.
+    expect(found.confidence).toEqual({ kind: "assessed", score: 66 });
+  });
+
+  it("H2: a record with mixed sources is admissible if any source is independent", () => {
+    // sources is per record. A record that carries an agent claim AND a check
+    // result is grounded by the check; the claim beside it does not un-ground it.
+    const id = subject();
+    supportRecord("alpha", ["AGENT_CLAIM", "VERIFICATION_RESULT"]);
+    expect(artifact("alpha", id).recurrence.supporting).toBe(1);
+  });
+
+  it("I: project isolation still holds under the gate", () => {
+    const id = subject("alpha");
+    for (let i = 0; i < 5; i += 1) supportRecord("beta", ["VERIFICATION_RESULT"]);
+
+    const found = artifact("alpha", id);
+    expect(found.recurrence.cohort).toBe(0);
+    expect(found.confidence).toEqual({ kind: "insufficient_evidence" });
+  });
+
+  it("J: input order still cannot affect the result", () => {
+    const forward = subject();
+    supportRecord("alpha", CLAIMED);
+    supportRecord("alpha", ["VERIFICATION_RESULT"]);
+    contradictRecord("alpha", CLAIMED);
+    supportRecord("alpha", ["HUMAN_DECISION"]);
+    const a = artifact("alpha", forward);
+
+    fresh();
+    supportRecord("alpha", ["HUMAN_DECISION"]);
+    contradictRecord("alpha", CLAIMED);
+    const reverse = subject();
+    supportRecord("alpha", ["VERIFICATION_RESULT"]);
+    supportRecord("alpha", CLAIMED);
+    const b = artifact("alpha", reverse);
+
+    expect(b.confidence).toEqual(a.confidence);
+    expect(b.recurrence.supporting).toBe(a.recurrence.supporting);
+    expect(b.recurrence.inadmissible).toBe(a.recurrence.inadmissible);
+  });
+
+  it("K: locale still cannot affect the result", () => {
+    const saved = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+    try {
+      const id = subject();
+      supportRecord("alpha", ["VERIFICATION_RESULT"]);
+      supportRecord("alpha", CLAIMED);
+      const expected = JSON.stringify(artifact("alpha", id));
+      for (const locale of ["tr-TR.UTF-8", "de-DE.UTF-8", "C", "en-US.UTF-8"]) {
+        process.env.LANG = locale;
+        process.env.LC_ALL = locale;
+        expect(JSON.stringify(artifact("alpha", id)), locale).toBe(expected);
+      }
+    } finally {
+      if (saved.LANG === undefined) delete process.env.LANG;
+      else process.env.LANG = saved.LANG;
+      if (saved.LC_ALL === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = saved.LC_ALL;
+    }
+  });
+
+  it("L: the gate introduced no model, reasoning, tool, adapter or graph import", () => {
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "..", "src", "experience", "experienceEvaluator.ts"), "utf8",
+    );
+    for (const forbidden of [
+      "models/", "reasoning/", "tools/", "adapters/", "graph/",
+      "anthropic", "reasoningModel",
+    ]) {
+      expect(source, `must not import ${forbidden}`).not.toContain(`"../${forbidden}`);
+      expect(source, `must not reference ${forbidden}`).not.toContain(`from "${forbidden}`);
+    }
+    // The admissibility set is the domain's, by reference - not a second copy
+    // that could drift from what the foundation assigned each source.
+    expect(source).toContain("new Set(INDEPENDENT_SOURCES)");
+  });
+
+  it("reports neutral and inadmissible as different facts", () => {
+    const id = subject();
+    // Silent on the approach, agent-claimed: NEUTRAL. Admissibility is moot for
+    // a record with nothing to say.
+    write("alpha", { successfulPatterns: ["connection pooling"], sources: CLAIMED });
+    // Speaks to the approach, agent-claimed: INADMISSIBLE. It has something to
+    // say and is not allowed to say it in the tally.
+    supportRecord("alpha", CLAIMED);
+
+    const found = artifact("alpha", id);
+    expect(found.recurrence.neutral).toBe(1);
+    expect(found.recurrence.inadmissible).toBe(1);
+  });
+
+  it("counts inadmissible records toward coverage - the corpus WAS examined", () => {
+    const id = subject();
+    for (let i = 0; i < 5; i += 1) supportRecord("alpha", CLAIMED);
+    const found = artifact("alpha", id);
+    expect(found.coverage).toEqual({ kind: "complete", examined: 6 });
   });
 });
 

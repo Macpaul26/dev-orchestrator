@@ -92,8 +92,11 @@ one run score no higher than three. No evidence produces no score at all rather
 than a zero, because "nothing corroborates this" and "everything contradicts
 this" are different findings.
 
-Provenance is deliberately not consulted - weighting by HUMAN_DECISION would
-rebuild an authority ladder inside the evaluator, behind a number. A bounded scan
+Provenance decides whether a record may vote, and never how much its vote is
+worth: an agent claim cannot count as evidence however often it is repeated, and
+a human decision counts exactly once, the same as a verification result -
+weighting by source would rebuild an authority ladder inside the evaluator,
+behind a number. A bounded scan
 is weighted down so it cannot claim what it did not cover. Nothing is persisted:
 the artifact sits beside the record and is never written into it. See
 [docs/PHASE-011.md](docs/PHASE-011.md).
