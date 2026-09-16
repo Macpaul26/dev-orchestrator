@@ -57,6 +57,20 @@ export const ContextProvenance = z.enum([
   "TASK_DESCRIPTION",
   /** Something an implementation agent once said. UNTRUSTED, permanently. */
   "HISTORICAL_AGENT_CLAIM",
+  /**
+   * Evaluated project experience from an earlier run (Task 012).
+   *
+   * MADE LIVE BY TASK 012. Task 008-A declared this provenance and its rank
+   * without adding either here, on the principle that a provenance nothing
+   * produces is a claim the system does not honour. Something produces it now:
+   * the historical-signal builder, which runs Task 010 retrieval and Task 011
+   * evaluation and hands the assembler a bounded projection of the result.
+   *
+   * It is still TEXT THAT ARRIVED FROM STORAGE. A high evaluated confidence
+   * says the project's independent evidence corroborated a pattern; it does
+   * not approve anything, grant anything, widen anything or skip anything.
+   */
+  "HISTORICAL_EXPERIENCE",
 ]);
 export type ContextProvenance = z.infer<typeof ContextProvenance>;
 
@@ -83,6 +97,19 @@ export const PROVENANCE_RANK: Readonly<Record<ContextProvenance, number>> = {
   PROJECT_METADATA: 80,
   REPOSITORY_OBSERVATION: 70,
   TASK_DESCRIPTION: 60,
+  /**
+   * Above a bare agent claim, below everything a human decided, everything
+   * the orchestrator observed itself, and the request being reasoned about.
+   *
+   * The value is `INTENDED_EXPERIENCE_RANK` from experience.ts, declared there
+   * in Task 008-A and checked against this table by a test - so the documented
+   * intent and the live ordering cannot drift apart without a test noticing.
+   * It is above HISTORICAL_AGENT_CLAIM because an evaluated experience carries
+   * independent corroboration an agent's bare narrative does not; it is below
+   * TASK_DESCRIPTION because what happened before must never outrank what is
+   * being asked now.
+   */
+  HISTORICAL_EXPERIENCE: 20,
   HISTORICAL_AGENT_CLAIM: 10,
 } as const;
 
@@ -122,6 +149,13 @@ export const PROVENANCE_LABEL: Readonly<Record<ContextProvenance, string>> = {
   HUMAN_CONSTRAINT: "HUMAN CONSTRAINT",
   REPOSITORY_OBSERVATION: "REPOSITORY OBSERVATION",
   TASK_DESCRIPTION: "TASK DESCRIPTION",
+  /**
+   * The label says what it is and what it is not. "Evaluated" tells the reader
+   * Task 011 ran; "historical" tells them it describes the past; neither word
+   * is "verified", "approved" or "trusted", because none of those is true of
+   * it.
+   */
+  HISTORICAL_EXPERIENCE: "EVALUATED HISTORICAL EXPERIENCE",
   HISTORICAL_AGENT_CLAIM: "UNTRUSTED AGENT CLAIM",
 } as const;
 
@@ -145,6 +179,12 @@ export const CONTEXT_LIMITS = {
   maxHumanConstraints: 40,
   maxRepositoryObservations: 80,
   maxHistoricalAgentClaims: 20,
+  /**
+   * Evaluated historical experiences one context may carry. Small on purpose:
+   * the signal builder presents at most this many, and the assembler enforces
+   * the same number independently so neither side is the only bound.
+   */
+  maxHistoricalExperience: 5,
   maxTaskDescriptionLength: 4_000,
   maxWarnings: 20,
 } as const;

@@ -345,5 +345,5 @@ and no persisted artifact that a strategy change would invalidate.
    is additive — `list(projectId)` behaves exactly as before — and it exists
    because the alternatives were worse: retrieval confined to one page, a new
    unbounded store method, or a retrieval layer reading the filesystem itself.
-6. **Nothing consumes retrieval yet.** It is deliberately unwired, and a test
+6. **Nothing consumes retrieval yet.** *(Resolved by Task 012: the historical-signal builder consumes it. See PHASE-012.)* It was deliberately unwired at the time, and a test
    asserts no model, reasoning, tool, adapter or graph module imports it.

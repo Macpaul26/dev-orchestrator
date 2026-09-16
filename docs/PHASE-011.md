@@ -474,7 +474,7 @@ their *values* are not measurements and are not presented as any.
    A bounded 60 and a complete 60 are different findings that happen to share a
    number; the coverage field is what distinguishes them, and a caller that
    ignores it will conflate them.
-6. **Nothing consumes evaluation yet.** Deliberately unwired.
+6. **Nothing consumes evaluation yet.** *(Resolved by Task 012: the historical-signal builder consumes it. See PHASE-012.)* Deliberately unwired at the time.
 
 ---
 

@@ -71,8 +71,8 @@ Retrieval cannot reach the filesystem: every candidate arrives through the store
 so Task 009's integrity, identity and project-ownership checks apply without
 being reimplemented, and a corrupt record is reported as rejected rather than
 returned. "Found nothing" and "could not examine the corpus" are different
-answers. Nothing consumes retrieval yet - it is deliberately unwired, and the
-reasoning model receives no historical memory. See
+answers. Retrieval is consumed by the Task 012 signal builder and by nothing
+else; it still has no path of its own to a model. See
 [docs/PHASE-010.md](docs/PHASE-010.md).
 
 **Task 011 is implemented: learning evaluation and confidence.**
@@ -101,25 +101,42 @@ is weighted down so it cannot claim what it did not cover. Nothing is persisted:
 the artifact sits beside the record and is never written into it. See
 [docs/PHASE-011.md](docs/PHASE-011.md).
 
-Nothing in the WORKFLOW writes or reads experience - the whole learning layer is
-deliberately unwired, and tests assert that no model, reasoning, tool, adapter or
-graph module imports any part of it. There is no cross-project access and no path
-from a model to any of it. See [docs/PHASE-009.md](docs/PHASE-009.md).
+**Task 012 is implemented: learning reaches reasoning.**
 
-(Retrieval and evaluation DO read the store - that is what Tasks 010 and 011 are.
-This paragraph previously said there was "no retrieval, no confidence
-evaluation", which stopped being true when those shipped and was corrected during
-Task 011.)
+The first controlled connection between the learning layer and the reasoning
+model. Trusted workflow code runs retrieval and evaluation over the current
+project's store and hands the Task 007 assembler a bounded projection - task
+type, a few normalized approaches, and the evaluator's counts and verdict. It
+enters through the SAME assembler as every other fact, at a provenance ranked
+below everything a human said, everything the orchestrator observed, and the
+request itself. There is no second prompt path.
+
+Only independently corroborated or contradicted experience is presented: the
+gate is "did evidence exist?", not a score cutoff, so an agent-planted record
+can be retrieved but never presented. A confidence of 100 approves nothing,
+grants nothing and skips nothing; the model still proposes, and the human still
+decides. "History could not be inspected" is recorded for the human and never
+rendered as "there is no history". See [docs/PHASE-012.md](docs/PHASE-012.md).
+
+Nothing in the workflow WRITES experience yet, so the store is empty in
+production and the historical signal is "none" on every real run. The workflow
+now READS it - through the plan node, through the signal builder, and nowhere
+else - which Task 012 made true. Tests assert the exact importers, that no
+model, tool or adapter module reaches any part of the learning layer, and that
+nothing in the learning layer imports reasoning, graph or model code. There is no
+cross-project access and no path from a model to any of it. See
+[docs/PHASE-009.md](docs/PHASE-009.md).
 
 **Direction: an orchestrator that learns from VERIFIED experience.**
 
 The long-term goal is a system that improves its own planning, implementation
 and verification strategy by learning from outcomes it independently verified -
 never from what an agent claimed. `src/domain/experience.ts` fixes the shape;
-Task 009 built the store, Task 010 retrieval, and Task 011 evaluation and
-confidence. What does NOT exist is anything that acts on them: no adaptive
-reasoning, no strategy learning, no self-improvement, and no route from stored
-experience into a reasoning prompt.
+Task 009 built the store, Task 010 retrieval, Task 011 evaluation and
+confidence, and Task 012 the one route from evaluated experience into the
+reasoning prompt. What does NOT exist is anything that ACTS on it: no strategy
+learning, no self-improvement, no automatic execution of a historically
+successful approach, and no change to any authority boundary.
 
 The invariant it exists to protect: **learning informs reasoning, and never
 becomes authority.** A lesson from a hundred verified runs is still text from
@@ -240,8 +257,9 @@ Tests assert each of those.
 
 | Document | Covers |
 | --- | --- |
-| [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why the store is deliberately unwired |
+| [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why nothing writes to the store yet |
 | [docs/PHASE-010.md](docs/PHASE-010.md) | Experience retrieval: the query model, the searchable projection and what is deliberately excluded from it, the tokenizer and ranking policy, deterministic total ordering, bounds, incomplete-retrieval semantics, corruption handling, why relevance is not confidence, and why similarity search and reasoning integration are deferred |
+| [docs/PHASE-012.md](docs/PHASE-012.md) | Learning reaches reasoning: the historical signal and its projection, the structural selection policy, the live HISTORICAL_EXPERIENCE provenance and rank, bounds, deterministic ordering, incomplete-data states, the pre-Task-012 fallback, import boundaries, mutation results, and what history is forbidden to influence |
 | [docs/PHASE-011.md](docs/PHASE-011.md) | Learning evaluation and confidence: the recurrence projection and why it is not a serialization, the supporting/contradictory/neutral model, the exact confidence formula and why volume saturates, why no evidence yields no score, why provenance does not weight the result, coverage weighting, mutation results, and why the thresholds remain unvalidated |
 | [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md) | The learning foundation: ARCHITECTURE ONLY - why a lesson can inform a proposal but never authorise one, how a claim differs from a verified outcome, the three memory layers, and the roadmap to Tasks 009-014 |
 | [docs/PHASE-008.md](docs/PHASE-008.md) | Controlled repository evidence: the closed operation set, the trusted caller boundary, path and sensitive-file security, excerpt bounds, and why the model has no evidence interface |

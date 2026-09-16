@@ -1,3 +1,4 @@
+import type { HistoricalSignalSummary } from "../domain/historicalSignal.js";
 import { Annotation } from "@langchain/langgraph";
 import type { Plan, HumanDecision } from "../domain/approval.js";
 import type { ImplementationReport, ReviewReport, CheckResult } from "../domain/reports.js";
@@ -143,6 +144,17 @@ export const OrchestratorState = Annotation.Root({
    * would make the checkpoint grow with the project.
    */
   contextSummary: Annotation<ContextSummary | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /**
+   * A BOUNDED SUMMARY of the historical signal the plan node built (Task 012).
+   *
+   * Counts, categories and reasons only - never an item, never an approach,
+   * never text from a record. It exists so the human at the gate can see
+   * whether history was inspected, whether the look was complete, and how much
+   * of what was found actually reached the model.
+   */
+  historicalSummary: Annotation<HistoricalSignalSummary | null>({
     reducer: (_p, n) => n, default: () => null,
   }),
   /** Model-proposed paths trusted code refused, and why. Shown to the human. */

@@ -785,7 +785,7 @@ describe("architecture boundaries", () => {
     // capability/grant/process check below covers every file in the layer.
     expect(sources.sort()).toEqual([
       "experienceEvaluator.ts", "experienceRetrieval.ts", "experienceStore.ts",
-      "projectQuota.ts",
+      "historicalSignal.ts", "projectQuota.ts",
     ]);
 
     for (const name of sources) {
@@ -814,8 +814,19 @@ describe("architecture boundaries", () => {
       }
     };
     walk(root);
-    // Task 010 owns retrieval; nothing produces or consumes experience yet.
-    expect(importers).toEqual([]);
+    /**
+     * UPDATED FOR TASK 012, DELIBERATELY. The store is now reachable from the
+     * workflow - and from EXACTLY two files: the node context that carries it
+     * and the runner that constructs it. The list is exact, so a second
+     * consumer cannot appear without editing this line and saying why. The
+     * plan node itself does not import the store; it imports the signal
+     * builder, which is what keeps retrieval-then-evaluation the only shape
+     * the workflow can ask for.
+     */
+    expect(importers.map((p) => p.split(path.sep).join("/")).sort()).toEqual([
+      "graph/context.ts",
+      "graph/runner.ts",
+    ]);
   });
 
   it("adds no capability to the matrix", async () => {

@@ -7,6 +7,7 @@ import type { CheckRunner } from "../verification/checks.js";
 import type { VerificationCheckPhase } from "../verification/checkPhase.js";
 import type { ReasoningModel } from "../models/reasoningModel.js";
 import type { RepositoryEvidenceService } from "../evidence/repositoryEvidence.js";
+import type { ExperienceStore } from "../experience/experienceStore.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 
 /**
@@ -49,6 +50,16 @@ export interface NodeContext {
    * see a bounded summary of what this found, through the context assembler.
    */
   evidenceService: RepositoryEvidenceService | null;
+  /**
+   * The experience store (Task 009), when one is configured.
+   *
+   * Consumed by the plan node through the historical-signal builder (Task
+   * 012), which runs retrieval and evaluation and yields a bounded signal for
+   * the context assembler. Null means the workflow reasons exactly as it did
+   * before Task 012, and the summary says so. The reasoning model has no
+   * interface to this and cannot ask for a memory.
+   */
+  experienceStore: ExperienceStore | null;
   /**
    * The implementation agent, if one is configured.
    *

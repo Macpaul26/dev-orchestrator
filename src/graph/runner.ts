@@ -21,6 +21,7 @@ import { DisabledCheckRunner } from "../verification/checks.js";
 import { VerificationCheckPhase } from "../verification/checkPhase.js";
 import { AnthropicReasoningModel } from "../models/anthropicModel.js";
 import { RepositoryEvidenceService } from "../evidence/repositoryEvidence.js";
+import { ExperienceStore } from "../experience/experienceStore.js";
 import type { ReasoningModel } from "../models/reasoningModel.js";
 import type { ImplementationAgent } from "../implementation/runner.js";
 import { ClaudeCodeAgent } from "../adapters/claude-code/agent.js";
@@ -65,15 +66,26 @@ export class WorkflowRunner {
     options: {
       agent?: ImplementationAgent | null;
       reasoningModel?: ReasoningModel | null;
+      /**
+       * The experience store (Task 009). Defaults to one rooted under the
+       * orchestrator home, which is empty until something writes experience;
+       * tests inject one rooted in a temp directory. Explicit null disables
+       * historical adaptation entirely.
+       */
+      experienceStore?: ExperienceStore | null;
     } = {},
   ) {
     this.ownsCheckpointer = checkpointer === undefined;
     this.checkpointer = checkpointer ?? createCheckpointer();
     this.agent = options.agent ?? null;
     this.reasoningModel = options.reasoningModel ?? null;
+    this.experienceStore = options.experienceStore === undefined
+      ? new ExperienceStore()
+      : options.experienceStore;
   }
 
   private readonly reasoningModel: ReasoningModel | null;
+  private readonly experienceStore: ExperienceStore | null;
 
   /**
    * Build the reasoning model, IF an operator configured one.
@@ -149,6 +161,9 @@ export class WorkflowRunner {
       // Built from the SAME inspector, so it inherits the boundary the
       // rest of the workflow is confined to rather than declaring its own.
       evidenceService: inspector ? new RepositoryEvidenceService(inspector) : null,
+      // Task 012. The node reaches this only through the historical-signal
+      // builder; the model has no interface to it at all.
+      experienceStore: this.experienceStore,
       // Null in production - Phase 4A connects no coding agent. Tests inject a
       // deterministic fake to exercise the capability boundary.
       // An explicitly injected agent wins; otherwise use one the operator

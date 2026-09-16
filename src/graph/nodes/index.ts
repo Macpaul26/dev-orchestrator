@@ -13,11 +13,13 @@ import { buildVerificationOutcome } from "../../verification/outcome.js";
 import { capturePolicy } from "../../verification/checkPolicy.js";
 import { planFromProposal } from "../../reasoning/proposal.js";
 import { assembleContext, detectAuthorityConflicts } from "../../reasoning/context.js";
+import { HistoricalSignalBuilder, renderHistoricalItem } from "../../experience/historicalSignal.js";
+import { HistoricalSignal, summariseHistoricalSignal } from "../../domain/historicalSignal.js";
 import { buildUserPrompt } from "../../reasoning/prompt.js";
 import {
   projectMetadata, humanDecisions, humanConstraints,
   repositoryObservations, taskDescription, historicalAgentClaims,
-  repositoryEvidence,
+  repositoryEvidence, historicalExperience,
 } from "../../reasoning/contextSources.js";
 import { summariseContext } from "../../domain/reasoningContext.js";
 import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
@@ -270,6 +272,26 @@ export const plan = (ctx: NodeContext) =>
         ])
       : null;
 
+    /**
+     * EVALUATED HISTORICAL EXPERIENCE (Task 012).
+     *
+     * Trusted workflow code runs Task 010 retrieval and Task 011 evaluation
+     * over THIS project's store and hands the assembler a bounded projection.
+     * The model does not choose what is retrieved, does not judge what is
+     * trustworthy, and has no interface to the store. What reaches it is text
+     * from storage, labelled as such, ranked below everything a human said,
+     * everything the orchestrator observed, and the request itself.
+     *
+     * A store that cannot be read yields `unavailable`, and the workflow
+     * reasons exactly as it did before Task 012 - no wider, no narrower, and
+     * with the same human gate. "History could not be inspected" is recorded
+     * for the human; it is never rendered as "there is no history".
+     */
+    const history = ctx.experienceStore
+      ? new HistoricalSignalBuilder(ctx.experienceStore).build(state.projectId, state.request)
+      : HistoricalSignal.parse({ kind: "unavailable", reason: "no_store" });
+    const historicalSummary = summariseHistoricalSignal(history);
+
     const assembled = assembleContext([
       ...projectMetadata(project),
       ...humanDecisions(ctx.store.listDecisions(state.projectId)),
@@ -280,6 +302,8 @@ export const plan = (ctx: NodeContext) =>
       ...(evidence ? repositoryEvidence(evidence) : []),
       ...taskDescription(state.request),
       ...historicalAgentClaims(ctx.store.listImplementations(state.projectId)),
+      // Same assembler, same checks, same fence. Learning has no other door.
+      ...historicalExperience(history, renderHistoricalItem),
     ]);
 
     /**
@@ -301,6 +325,7 @@ export const plan = (ctx: NodeContext) =>
           "Planning stopped: the reasoning context could not be assembled.",
         ),
         reasoningNotes: [`context assembly failed: ${assembled.failure.code}`],
+        historicalSummary,
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -334,6 +359,7 @@ export const plan = (ctx: NodeContext) =>
         ),
         reasoningNotes: ["context rendering failed: over the transport limit"],
         contextSummary: summariseContext(assembled.context),
+        historicalSummary,
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -370,6 +396,7 @@ export const plan = (ctx: NodeContext) =>
         reasoningFailure: result.failure,
         reasoningNotes: [`reasoning unavailable: ${result.failure.code}`],
         contextSummary: summariseContext(assembled.context),
+        historicalSummary,
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -401,6 +428,7 @@ export const plan = (ctx: NodeContext) =>
         ),
       ],
       contextSummary: summariseContext(assembled.context),
+      historicalSummary,
       phase: "approve_plan",
     } as OrchestratorUpdate;
   };

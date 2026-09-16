@@ -70,7 +70,7 @@ afterEach(() => {
 
 // ===========================================================================
 describe("A - provenance", () => {
-  it("supports all six required types and renders each distinctly", () => {
+  it("supports all seven provenance types and renders each distinctly", () => {
     const context = assembled([
       record("PROJECT_METADATA", "p", "Project name: Demo"),
       record("HUMAN_DECISION", "d", "Use PostgreSQL."),
@@ -78,8 +78,10 @@ describe("A - provenance", () => {
       record("REPOSITORY_OBSERVATION", "o", "Working tree contains modified file: src/a.ts"),
       record("TASK_DESCRIPTION", "t", "Implement rate limiting."),
       record("HISTORICAL_AGENT_CLAIM", "h", "Previous implementation reported success."),
+      // Task 012: evaluated historical experience, labelled as exactly that.
+      record("HISTORICAL_EXPERIENCE", "e", "Earlier work recorded an approach."),
     ]);
-    expect(context.records).toHaveLength(6);
+    expect(context.records).toHaveLength(7);
 
     const rendered = renderContext(context);
     for (const provenance of ContextProvenance.options) {

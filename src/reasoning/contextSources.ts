@@ -3,6 +3,9 @@ import type { Project, Decision } from "../domain/project.js";
 import type { ImplementationRun } from "../domain/implementation.js";
 import type { EvidenceOutcome } from "../domain/repositoryEvidence.js";
 import { CONTEXT_LIMITS } from "../domain/reasoningContext.js";
+import {
+  HISTORICAL_SIGNAL_LIMITS, type HistoricalSignal, type HistoricalItem,
+} from "../domain/historicalSignal.js";
 import type { ContextInput } from "./context.js";
 
 /**
@@ -180,6 +183,54 @@ export function historicalAgentClaims(
           ? "Partial changes may remain in the repository."
           : "It completed cleanly."),
       at: run.startedAt,
+    }));
+}
+
+/**
+ * Evaluated historical experience, as context records (Task 012).
+ *
+ * ---------------------------------------------------------------------------
+ * THE ONLY WAY LEARNING REACHES A MODEL
+ * ---------------------------------------------------------------------------
+ * This file imports the SIGNAL TYPE and nothing else from the learning layer -
+ * not the store, not retrieval, not the evaluator. The reasoning layer cannot
+ * fetch a memory; it can only render what the workflow already selected under
+ * the documented policy. And what it renders goes through exactly what every
+ * other fact goes through: validation, the credential check, deterministic
+ * ordering, deduplication, the bounds, and the fenced prompt boundary.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IS RENDERED, AND WHAT IS NOT
+ * ---------------------------------------------------------------------------
+ * `present` items render one record each, keyed by experience id - stable,
+ * content-derived, and nothing to do with the order they arrived in.
+ *
+ * `none` renders NOTHING. A complete look that found nothing is silence, not a
+ * sentence claiming there is no history - the summary carries that fact to the
+ * human, and the model is not told something it might treat as licence.
+ *
+ * `unavailable` ALSO renders nothing into the model's context. "History could
+ * not be inspected" is a fact for the human at the gate, recorded in the
+ * summary and the reasoning notes; it is not a fact the model needs, and a
+ * sentence about a failed subsystem is a sentence a model might reason from.
+ *
+ * `present` with NO items - every candidate omitted for lack of independent
+ * evidence - renders nothing for the same reason, and is the common case in a
+ * young project.
+ */
+export function historicalExperience(
+  signal: HistoricalSignal,
+  render: (item: HistoricalItem) => string,
+): ContextInput[] {
+  if (signal.kind !== "present") return [];
+  return signal.items
+    .slice(0, HISTORICAL_SIGNAL_LIMITS.maxPresented)
+    .map((item) => ({
+      provenance: "HISTORICAL_EXPERIENCE" as const,
+      key: `experience.${item.experienceId}`,
+      // Rendered by the SAME function the builder sized it with, so the text
+      // that reaches the assembler is the text the budget was computed on.
+      text: render(item),
     }));
 }
 

@@ -209,6 +209,7 @@ export function assembleContext(
       case "HUMAN_CONSTRAINT": return CONTEXT_LIMITS.maxHumanConstraints;
       case "REPOSITORY_OBSERVATION": return CONTEXT_LIMITS.maxRepositoryObservations;
       case "HISTORICAL_AGENT_CLAIM": return CONTEXT_LIMITS.maxHistoricalAgentClaims;
+      case "HISTORICAL_EXPERIENCE": return CONTEXT_LIMITS.maxHistoricalExperience;
       case "TASK_DESCRIPTION": return CONTEXT_LIMITS.maxRecords;
     }
   };

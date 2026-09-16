@@ -366,17 +366,33 @@ describe("experience stays bounded", () => {
 });
 
 // ===========================================================================
-describe("the live authority model is unchanged", () => {
-  it("has NOT gained a historical-experience provenance yet", () => {
-    expect(ContextProvenance.options).not.toContain(INTENDED_EXPERIENCE_PROVENANCE);
-    expect(Object.keys(PROVENANCE_RANK)).not.toContain(INTENDED_EXPERIENCE_PROVENANCE);
+describe("the live authority model matches the declared intent", () => {
+  it("has gained EXACTLY the historical-experience provenance it declared", () => {
+    /**
+     * UPDATED FOR TASK 012, DELIBERATELY - and made STRONGER, not weaker.
+     *
+     * Task 008-A declared this provenance and its rank without adding either
+     * to the live table, and this test asserted the absence: a provenance
+     * nothing produces is a claim the system does not honour. Task 012 added
+     * the producer. The assertion now flips from "absent" to "present AND
+     * identical to what was declared", so the documented intent and the live
+     * ordering cannot drift apart without this failing.
+     */
+    expect(ContextProvenance.options).toContain(INTENDED_EXPERIENCE_PROVENANCE);
+    expect(PROVENANCE_RANK[INTENDED_EXPERIENCE_PROVENANCE]).toBe(INTENDED_EXPERIENCE_RANK);
   });
 
-  it("keeps the six existing provenance classes and their order", () => {
+  it("keeps the seven provenance classes and their order", () => {
     expect([...ContextProvenance.options].sort()).toEqual([
-      "HISTORICAL_AGENT_CLAIM", "HUMAN_CONSTRAINT", "HUMAN_DECISION",
-      "PROJECT_METADATA", "REPOSITORY_OBSERVATION", "TASK_DESCRIPTION",
+      "HISTORICAL_AGENT_CLAIM", "HISTORICAL_EXPERIENCE", "HUMAN_CONSTRAINT",
+      "HUMAN_DECISION", "PROJECT_METADATA", "REPOSITORY_OBSERVATION",
+      "TASK_DESCRIPTION",
     ]);
+    // Historical experience sits above a bare agent claim and below the task.
+    expect(PROVENANCE_RANK.TASK_DESCRIPTION)
+      .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_EXPERIENCE);
+    expect(PROVENANCE_RANK.HISTORICAL_EXPERIENCE)
+      .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_AGENT_CLAIM);
     expect(PROVENANCE_RANK.HUMAN_DECISION).toBeGreaterThan(PROVENANCE_RANK.HUMAN_CONSTRAINT);
     expect(PROVENANCE_RANK.HUMAN_CONSTRAINT).toBeGreaterThan(PROVENANCE_RANK.PROJECT_METADATA);
     expect(PROVENANCE_RANK.PROJECT_METADATA)
@@ -387,12 +403,14 @@ describe("the live authority model is unchanged", () => {
       .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_AGENT_CLAIM);
   });
 
-  it("plans a rank for experience that outranks no human or observed source", () => {
-    expect(INTENDED_EXPERIENCE_RANK)
-      .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_AGENT_CLAIM);
-    expect(INTENDED_EXPERIENCE_RANK).toBeLessThan(PROVENANCE_RANK.TASK_DESCRIPTION);
-    expect(INTENDED_EXPERIENCE_RANK).toBeLessThan(PROVENANCE_RANK.HUMAN_DECISION);
-    expect(INTENDED_EXPERIENCE_RANK).toBeLessThan(PROVENANCE_RANK.HUMAN_CONSTRAINT);
+  it("ranks live experience below every human or observed source", () => {
+    const live = PROVENANCE_RANK.HISTORICAL_EXPERIENCE;
+    expect(live).toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_AGENT_CLAIM);
+    expect(live).toBeLessThan(PROVENANCE_RANK.TASK_DESCRIPTION);
+    expect(live).toBeLessThan(PROVENANCE_RANK.REPOSITORY_OBSERVATION);
+    expect(live).toBeLessThan(PROVENANCE_RANK.PROJECT_METADATA);
+    expect(live).toBeLessThan(PROVENANCE_RANK.HUMAN_CONSTRAINT);
+    expect(live).toBeLessThan(PROVENANCE_RANK.HUMAN_DECISION);
   });
 });
 

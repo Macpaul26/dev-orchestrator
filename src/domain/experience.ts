@@ -339,12 +339,16 @@ export const FORBIDDEN_EXPERIENCE_KEYS: readonly string[] = [
 ] as const;
 
 /**
- * The provenance experience will carry when it eventually reaches reasoning.
+ * The provenance experience carries when it reaches reasoning.
  *
- * DECLARED, NOT LIVE. `ContextProvenance` has not gained this class, because
- * nothing produces experience and a provenance nothing uses is a claim the
- * system does not honour. The intended rank sits above a bare agent claim and
- * below everything a human decided or the orchestrator observed itself.
+ * LIVE SINCE TASK 012. Task 008-A declared these without adding them to
+ * `ContextProvenance`, on the principle that a provenance nothing produces is
+ * a claim the system does not honour. Task 012 added the producer - the
+ * historical-signal builder - and the live entries. These constants stay as
+ * the declared intent, and a test asserts the live table matches them, so the
+ * two cannot drift apart silently. The rank sits above a bare agent claim and
+ * below everything a human decided, the orchestrator observed itself, or the
+ * request being reasoned about.
  */
 export const INTENDED_EXPERIENCE_PROVENANCE = "HISTORICAL_EXPERIENCE" as const;
 export const INTENDED_EXPERIENCE_RANK = 20 as const;

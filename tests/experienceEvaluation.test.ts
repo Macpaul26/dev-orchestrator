@@ -1132,11 +1132,20 @@ describe("architecture boundaries", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("adds no historical provenance to the live reasoning table", async () => {
+  it("reaches the live reasoning table only at the declared rank", async () => {
+    /**
+     * UPDATED FOR TASK 012. This asserted the provenance was absent, which was
+     * true until something produced it. Now it asserts the stronger thing: it
+     * is present at exactly the rank Task 008-A declared, below every human,
+     * observed and current source.
+     */
     const { ContextProvenance, PROVENANCE_RANK } =
       await import("../src/domain/reasoningContext.js");
-    expect(ContextProvenance.options).not.toContain("HISTORICAL_EXPERIENCE");
-    expect(Object.keys(PROVENANCE_RANK)).not.toContain("HISTORICAL_EXPERIENCE");
+    const { INTENDED_EXPERIENCE_RANK } = await import("../src/domain/experience.js");
+    expect(ContextProvenance.options).toContain("HISTORICAL_EXPERIENCE");
+    expect(PROVENANCE_RANK.HISTORICAL_EXPERIENCE).toBe(INTENDED_EXPERIENCE_RANK);
+    expect(PROVENANCE_RANK.HISTORICAL_EXPERIENCE)
+      .toBeLessThan(PROVENANCE_RANK.TASK_DESCRIPTION);
   });
 
   it("adds no capability to the matrix", async () => {
