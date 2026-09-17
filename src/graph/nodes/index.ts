@@ -1309,6 +1309,12 @@ export const approveReview = (ctx: NodeContext) =>
           anotherIterationPossible:
             state.iteration < (state.iterationLimit ?? ITERATION_LIMITS.defaultMaxIterations)
             && safety.length === 0,
+          /**
+           * A safety condition is terminal. Approving this review records
+           * the decision but ends the run INCOMPLETE, not completed - said
+           * here so the human knows before deciding, not after.
+           */
+          approvalCanComplete: safety.length === 0,
           safetyConditions: safety,
           completion,
         },

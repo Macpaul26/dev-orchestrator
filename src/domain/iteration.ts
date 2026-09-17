@@ -190,19 +190,44 @@ export function assessCompletion(input: {
  * safety conditions verification observed. There is no field for anything the
  * model or the agent said, so there is nothing for them to say.
  *
- * Precedence:
- *   approve  -> stop, human_approved        (authority: the human)
- *   reject   -> stop, human_rejected        (authority: the human)
+ * Precedence - SAFETY FIRST, then the human, then the bound:
+ *   any safety condition  -> stop, safety_stop        (incomplete, never completed)
+ *   no decision recorded  -> stop, safety_stop
+ *   approve               -> stop, human_approved     (authority: the human)
+ *   reject                -> stop, human_rejected     (authority: the human)
  *   feedback / edit  = changes requested:
- *       any safety condition  -> stop, safety_stop
- *       iteration < limit     -> continue with iteration + 1
- *       otherwise             -> stop, iteration_limit_reached
+ *       iteration < limit -> continue with iteration + 1
+ *       otherwise         -> stop, iteration_limit_reached
  *
- * A safety condition outranks a request for changes because the request is
- * about the work and the condition is about the environment the work runs in.
- * It never outranks a human approval or rejection: those are decisions about
- * THIS iteration, which already happened; safety governs whether the NEXT one
- * may start.
+ * ---------------------------------------------------------------------------
+ * CORRECTED AFTER INDEPENDENT REVIEW
+ * ---------------------------------------------------------------------------
+ * The first version checked the human's decision BEFORE the safety conditions,
+ * on the reasoning that a decision is about the iteration that already
+ * happened while safety governs the next one. Review found the consequence:
+ * verification observes an unauthorised git mutation, the human approves the
+ * review, and the run ends COMPLETED / approved - a machine-observed safety
+ * violation erased by an approval. That is not what "safety failure = stop"
+ * means.
+ *
+ *     VERIFICATION-OBSERVED SAFETY FAILURE  -/->  COMPLETED
+ *
+ * So safety is evaluated first. A safety condition is a fact about the
+ * control environment - git used without a grant, a rewritten check policy, a
+ * swapped verification executable, checks that changed the repository, a
+ * write outside the approved scope, a repository that could not be observed -
+ * and no decision at the review gate can make it not have happened. The
+ * human still controls the review decision and it is still recorded; what an
+ * approval can no longer do is turn that iteration into a successful run.
+ * The run stops `incomplete`, and a human starts a new one, on a repository
+ * they have looked at.
+ *
+ * This is deliberately NOT "every review finding overrides the human". A
+ * failed check, a false claim, a disagreement between what the agent said and
+ * what the repository shows - those are review findings about the WORK, they
+ * are listed as blockers to completion, and the human may approve over them.
+ * The `SafetyCondition` vocabulary is the whole of what overrides, and it is
+ * derived only from what verification observed.
  */
 export const LoopDecision = z.discriminatedUnion("kind", [
   z.object({
@@ -230,6 +255,17 @@ export function decideNextIteration(input: {
   const iteration = z.number().int().positive().parse(input.iteration);
   const decision = input.reviewDecision;
 
+  // SAFETY FIRST. Before the decision is even read: an observed safety
+  // condition ends the run whatever the human decided, and the detail says so.
+  if (input.safety.length > 0) {
+    return LoopDecision.parse({
+      kind: "stop", reason: "safety_stop", decidedBy: decision?.decidedBy ?? null,
+      detail: `verification observed ${input.safety.join(", ")}` +
+        (decision ? `; the human's "${decision.kind}" decision is recorded but cannot ` +
+          "complete a run whose safety boundary was crossed" : ""),
+    });
+  }
+
   // No human decision on record is not permission to do anything.
   if (!decision) {
     return LoopDecision.parse({
@@ -250,12 +286,6 @@ export function decideNextIteration(input: {
     });
   }
   // feedback or edit: the human asked for changes.
-  if (input.safety.length > 0) {
-    return LoopDecision.parse({
-      kind: "stop", reason: "safety_stop", decidedBy: decision.decidedBy,
-      detail: `changes were requested, but verification observed: ${input.safety.join(", ")}`,
-    });
-  }
   if (iteration < limit) {
     return LoopDecision.parse({ kind: "continue", nextIteration: iteration + 1, limit });
   }

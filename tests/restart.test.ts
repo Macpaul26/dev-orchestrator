@@ -44,6 +44,14 @@ beforeEach(() => {
     ORCHESTRATOR_HOME: path.join(tmp, ".orchestrator"),
     ORCHESTRATOR_PROJECTS: path.join(tmp, "projects"),
   };
+  /**
+   * UPDATED FOR THE TASK 014 SAFETY CORRECTION, DELIBERATELY. A run completes
+   * only on an inspectable repository - `inspection_unavailable` is a terminal
+   * safety condition - so the fixture project is a real repository. What this
+   * file proves is durability across processes; it is proven on a project
+   * that can actually be completed.
+   */
+  initRepo(path.join(tmp, "src"));
   runCli(["project:create", "--id", "demo", "--name", "Demo", "--dir", path.join(tmp, "src")]);
 });
 
@@ -119,6 +127,7 @@ describe("durable resume across process death", () => {
   });
 
   it("keeps two projects' suspended runs independent across processes", () => {
+    initRepo(path.join(tmp, "o"));
     runCli(["project:create", "--id", "other", "--name", "Other", "--dir", path.join(tmp, "o")]);
     const a = runIdFrom(runCli(["start", "--project", "demo", "--request", "A"]).stdout);
     const b = runIdFrom(runCli(["start", "--project", "other", "--request", "B"]).stdout);
@@ -144,12 +153,6 @@ describe("Task 014 - the loop survives process death between iterations", () => 
     JSON.parse(fs.readFileSync(path.join(tmp, "projects", "demo", "runs", `${runId}.json`), "utf8")) as Record<string, unknown>;
 
   it("carries iteration identity, the bound and the pending approval across five separate processes", () => {
-    // A second iteration needs an INSPECTABLE repository: without one,
-    // verification cannot observe anything and the loop refuses to iterate
-    // blind (safety_stop: inspection_unavailable) - which is the right answer
-    // for the bare directory the other tests use, but not what this proves.
-    initRepo(path.join(tmp, "src"));
-
     // ---- PROCESS 1: start with a configured bound of 2, suspend at plan gate 1, EXIT ----
     const p1 = runCli(["start", "--project", "demo", "--request", "Loop me", "--max-iterations", "2"]);
     const runId = runIdFrom(p1.stdout);

@@ -169,16 +169,43 @@ It is visible in state, in the run record, in every approval payload, in the
 
 ## 7. Stop conditions
 
-`StopReason` is a closed enum. Precedence in `decideNextIteration`:
+`StopReason` is a closed enum. Precedence in `decideNextIteration` —
+**safety first, then the human, then the bound:**
 
-| Review decision | Safety | Iteration | Result | Run status / outcome |
+| Safety | Review decision | Iteration | Result | Run status / outcome |
 | --- | --- | --- | --- | --- |
-| approve | any | any | stop `human_approved` | `completed` / `approved` |
-| reject | any | any | stop `human_rejected` | `rejected` / `rejected_at_review` |
-| feedback / edit | any condition | any | stop `safety_stop` | `incomplete` / `incomplete:safety_stop` |
-| feedback / edit | none | < limit | **continue** | — |
-| feedback / edit | none | = limit | stop `iteration_limit_reached` | `incomplete` / `incomplete:iteration_limit_reached` |
-| (none recorded) | — | — | stop `safety_stop` | `incomplete` |
+| **any condition** | **any (approve included)** | any | stop `safety_stop` | `incomplete` / `incomplete:safety_stop` |
+| none | (none recorded) | — | stop `safety_stop` | `incomplete` |
+| none | approve | any | stop `human_approved` | `completed` / `approved` |
+| none | reject | any | stop `human_rejected` | `rejected` / `rejected_at_review` |
+| none | feedback / edit | < limit | **continue** | — |
+| none | feedback / edit | = limit | stop `iteration_limit_reached` | `incomplete` / `incomplete:iteration_limit_reached` |
+
+> **Corrected after independent review.** The first version checked the
+> human's decision before the safety conditions, so an unauthorised git
+> mutation followed by a review approval ended `completed` / `approved`. The
+> review found it; the ordering is now safety first, and a mutation that
+> restores the old ordering (§15, #21) is caught.
+>
+> **Verification-observed safety conditions are terminal safety boundaries. A
+> human review approval cannot convert a safety-stop condition into a
+> completed run.**
+>
+> This does not remove human authority. The human still controls the review
+> decision: it is requested, recorded in `decisions`, carried on the iteration
+> record and in the loop decision's `decidedBy`, and written into the
+> experience record's sources. What an approval can no longer do is turn an
+> iteration whose safety boundary was crossed into a successful run — the run
+> ends `incomplete`, and a human starts a new one on a repository they have
+> looked at. The review gate says so before the decision is made
+> (`approvalCanComplete: false`, rendered as a SAFETY line in the CLI).
+>
+> **Safety is not review quality.** A failed check, a claim the repository
+> contradicts, a disagreement — those are findings about the *work*; they are
+> listed as blockers to completion and the human may approve over them
+> (tested: a false claim approved ends `completed`). Only the six
+> `SafetyCondition` values, derived from what verification observed about the
+> *control environment*, are terminal.
 
 Rejection at the plan gate stops with `human_rejected` / `rejected_at_plan`,
 as before.
@@ -186,12 +213,16 @@ as before.
 `SafetyCondition` (derived only from the trusted verification outcome):
 `unauthorised_git_mutation`, `check_policy_changed`,
 `check_integrity_blocked`, `checks_changed_repository`, `scope_drift`,
-`inspection_unavailable`. A safety condition outranks a request for changes —
-the request is about the work, the condition is about the environment the
-work runs in — but never outranks a human approval or rejection, which are
-decisions about the iteration that already happened. `inspection_unavailable`
-means the orchestrator refuses to iterate blind: a project without an
-inspectable repository gets one iteration and then a human.
+`inspection_unavailable`. A condition is a fact about the environment the
+work ran in, and no decision at the review gate can make it not have
+happened. `inspection_unavailable` means the orchestrator refuses to
+complete or iterate blind: **a project without an inspectable repository can
+never reach `completed`** - the orchestrator observed nothing, so it can
+vouch for nothing. Decided with the Director when the correction surfaced it:
+three Phase 2 fixtures were bare directories and used to reach `completed` on
+approval; they now have repositories, and the bare-directory case is pinned
+by its own test (`NO REPOSITORY, NO COMPLETION`). To be completed, a project
+must be inspectable.
 
 `incomplete` is a third terminal status: nothing was approved and no human
 said no. It is never converted into `completed`; the CLI prints
@@ -410,6 +441,8 @@ each and at the end. Run against `tests/autonomousLoop.test.ts`.
 | 18 | scope inheritance: a new grant inherits every earlier grant's scope | caught |
 | 19 | restart re-limits: a resuming runner imposes its own bound | caught |
 | 20 | learning leaks the agent's account and `AGENT_CLAIM` into the record | caught |
+| 21 | **correction:** the vulnerable ordering restored — approval checked before safety | caught |
+| 22 | **correction:** safety gates everything except approval | caught |
 
 Exact failing counts are in the completion report. Mutation 15's first
 version did not compile (a type-narrowing artefact in the mutation text, not
@@ -429,13 +462,13 @@ from that pass.
 | B | feedback → iteration 2 at the plan gate with its own approval and grant → `approved` at iteration 2; two records |
 | C | old plan decision refused by the runner; implement refuses a foreign grant; scope not inherited |
 | D | `maxIterations: 2` → `incomplete:iteration_limit_reached`; limit 1; invalid bounds refused |
-| E | out-of-scope side effect → blockers, safety stop; false claim → changes requested, iteration 2 via plan gate |
+| E | out-of-scope side effect → blockers, safety stop on feedback **and on approve**; false claim → changes requested, iteration 2 via plan gate |
 | F | plan rejected → nothing implemented |
 | G | review rejected → no approval, no iteration, failed patterns recorded |
 | H | fresh runners and closed connections between iterations; run file read from disk; a different resuming bound does not win |
 | I | hostile response with `approved/complete/skipVerification/maxIterations/capabilities/scope/grant` → schema refused, zero-scope plan, bound unchanged; `/` and `../` refused; `complete: true` alone does nothing |
 | J | ESTABLISHED strategy reaches the model; gates, grant, scope, capabilities, risk, bound unchanged |
-| K | agent commits with git → unauthorised, blocker, safety stop; `git.mutate` unmintable |
+| K | agent commits with git → unauthorised, blocker, safety stop; **unauthorised git + human APPROVE → `incomplete:safety_stop`, decision recorded, no later edge, not resumable**; a non-safety finding approved → `completed`; `git.mutate` unmintable |
 | L | start refused for is / inside / encloses; implement refused after re-pointing; session cannot reach orchestrator sources |
 | — | topology equals the compiled graph; idempotent implement; task-status table; loop decision precedence; observational completion; digests; iteration record; producer writes no agent text |
 
@@ -457,9 +490,10 @@ from that pass.
    repository.** An agent process is still not OS-sandboxed (Phase 4B.1); a
    side effect outside the repository is not observed and therefore not a
    safety condition. Unchanged from before, and unchanged in scope.
-5. **The human's review approval is authoritative even when the completion
-   assessment lists blockers.** The blockers are shown, recorded, and written
-   into the experience record as failures; the decision remains the human's.
+5. **The human's review approval is authoritative over review findings, not
+   over safety conditions.** Blockers that are findings about the work are
+   shown, recorded, written into the experience record as failures, and the
+   human may approve over them. The six safety conditions are terminal (§7).
 6. **Grant lifetime (15 min default) spans one implement node, not an
    iteration.** A human who approves a plan and walks away for an hour comes
    back to an expired grant and a refused attempt — fail-closed, as before.

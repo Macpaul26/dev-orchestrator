@@ -35,6 +35,11 @@ export function renderApproval(request: ApprovalRequest): void {
     if (it["anotherIterationPossible"] === false) {
       line("    NOTE: requesting changes cannot start another iteration (bound exhausted or safety condition)");
     }
+    if (it["approvalCanComplete"] === false) {
+      line("    SAFETY: verification observed a safety condition. Approving records your decision");
+      line("            but the run ends INCOMPLETE, not completed - the boundary was crossed.");
+      for (const c of (it["safetyConditions"] as string[] | undefined) ?? []) line(`            - ${c}`);
+    }
     const completion = it["completion"] as { blockers?: string[] } | undefined;
     for (const blocker of completion?.blockers ?? []) line(`    blocker: ${blocker}`);
   }

@@ -486,6 +486,24 @@ describe("Scenario E - verification failure never approves", () => {
     expect(store.listGrants("proj")).toHaveLength(1);
   });
 
+  it("an out-of-scope side effect followed by human APPROVAL is still a safety stop, not completion", async () => {
+    const agent = new FakeImplementationAgent({
+      steps: [
+        { kind: "write", path: "src/a.ts", contents: "export const a = 2;\n" },
+        { kind: "sideEffect", path: "secret/outside.txt", contents: "written around the boundary\n" },
+      ],
+      repoRoot: repo,
+    });
+    const started = await newRunner({ agent }).start("proj", "bump a");
+    const atReview = await iterateToReviewGate(started.run.id, started.pendingApproval!, { agent });
+    expect((atReview.pendingApproval!.payload["iteration"] as Record<string, unknown>)["approvalCanComplete"]).toBe(false);
+    const stopped = await newRunner({ agent }).resume(started.run.id, decide(atReview.pendingApproval!.approvalId, "approve"));
+    expect(stopped.run.status).toBe("incomplete");
+    expect(stopped.run.outcome).toBe("incomplete:safety_stop");
+    expect(stopped.run.stopReason).toBe("safety_stop");
+    expect(stopped.state.stop?.detail).toMatch(/scope_drift/);
+  });
+
   it("a false claim: review withholds pass, and a change request may open iteration 2 only through the plan gate", async () => {
     const agent = new FakeImplementationAgent({
       steps: [{ kind: "write", path: "src/a.ts", contents: "export const a = 2;\n" }],
@@ -697,6 +715,107 @@ describe("Scenario K - a HIGH-risk action keeps its existing authorization", () 
     expect(stopped.run.stopReason).toBe("safety_stop");
   });
 
+  it("SAFETY STOP IS NOT OVERRIDDEN BY REVIEW APPROVAL: unauthorised git + human approve -> INCOMPLETE", async () => {
+    /**
+     * CORRECTED AFTER INDEPENDENT REVIEW. Before the correction this run
+     * ended `completed` / `approved`: the agent committed without a grant,
+     * verification saw it, and a human approval erased it. Now the approval
+     * is recorded and the run ends incomplete with reason safety_stop.
+     */
+    const agent = new FakeImplementationAgent({
+      steps: [
+        { kind: "write", path: "src/a.ts", contents: "export const a = 2;\n" },
+        { kind: "gitCommand", args: ["add", "-A"] },
+        { kind: "gitCommand", args: ["commit", "-q", "-m", "agent commit"] },
+      ],
+      repoRoot: repo,
+    });
+    const started = await newRunner({ agent, maxIterations: 3 }).start("proj", "bump a");
+    const atReview = await iterateToReviewGate(started.run.id, started.pendingApproval!, { agent, maxIterations: 3 });
+    const it = atReview.pendingApproval!.payload["iteration"] as Record<string, unknown>;
+    expect(it["safetyConditions"]).toContain("unauthorised_git_mutation");
+    // The human is told BEFORE deciding that approval cannot complete the run.
+    expect(it["approvalCanComplete"]).toBe(false);
+
+    const done = await newRunner({ agent, maxIterations: 3 }).resume(
+      started.run.id, decide(atReview.pendingApproval!.approvalId, "approve"),
+    );
+    expect(done.run.status).toBe("incomplete");
+    expect(done.run.status).not.toBe("completed");
+    expect(done.run.outcome).toBe("incomplete:safety_stop");
+    expect(done.run.outcome).not.toBe("approved");
+    expect(done.run.stopReason).toBe("safety_stop");
+    expect(done.pendingApproval).toBeNull();
+    // The human's decision is still on the record - authority was exercised,
+    // it just could not complete a run whose boundary was crossed.
+    expect(done.state.decisions!.at(-1)).toMatchObject({ kind: "approve", decidedBy: "the-owner" });
+    expect(done.state.stop).toMatchObject({ kind: "stop", reason: "safety_stop", decidedBy: "the-owner" });
+    expect(done.state.stop?.detail).toMatch(/unauthorised_git_mutation/);
+    expect(done.state.iterations).toHaveLength(1);
+    expect(done.state.iterations![0]!.loop).toMatchObject({ kind: "stop", reason: "safety_stop" });
+    expect(done.state.iterations![0]!.reviewDecision).toBe("approve");
+    // No later edge: exactly one iteration started, one ended, and the run is not resumable.
+    const events = history(started.run.id);
+    expect(events.filter((e) => e["type"] === "iteration_started")).toHaveLength(1);
+    expect(events.filter((e) => e["type"] === "iteration_ended").map((e) => e["decision"])).toEqual(["safety_stop"]);
+    expect(events.filter((e) => e["type"] === "node_started" && e["node"] === "inspect")).toHaveLength(1);
+    expect(events.at(-1)!["type"]).toBe("workflow_completed");
+    expect(events.at(-1)!["outcome"]).toBe("incomplete:safety_stop");
+    await expect(newRunner({ agent }).resume(started.run.id, decide(atReview.pendingApproval!.approvalId, "approve")))
+      .rejects.toThrow(/not awaiting approval/);
+    expect(store.listGrants("proj")).toHaveLength(1);
+    // The learn step recorded the iteration as failed, with the human decision as a source.
+    const listed = experience.list("proj");
+    expect(listed.records).toHaveLength(1);
+    expect(listed.records[0]!.record.failedPatterns.length).toBeGreaterThan(0);
+  });
+
+  it("NO REPOSITORY, NO COMPLETION: a project that cannot be inspected ends incomplete even on approval", async () => {
+    /**
+     * Decided with the Director after the correction surfaced it: three
+     * Phase 2 fixtures were bare directories and used to reach `completed`
+     * on approval. `inspection_unavailable` is a safety condition - the
+     * orchestrator observed nothing, so it can vouch for nothing - and the
+     * rule is no observation, no completion. Those fixtures now have
+     * repositories; this test keeps the bare-directory case pinned.
+     */
+    fs.mkdirSync(path.join(tmp, "bare"));
+    createProject("bare", path.join(tmp, "bare"));
+    const started = await newRunner().start("bare", "do something");
+    expect(started.pendingApproval?.kind).toBe("plan");
+    const atReview = await newRunner().resume(started.run.id, decide(started.pendingApproval!.approvalId, "approve"));
+    expect(atReview.pendingApproval?.kind).toBe("review");
+    const it = atReview.pendingApproval!.payload["iteration"] as Record<string, unknown>;
+    expect(it["safetyConditions"]).toEqual(["inspection_unavailable"]);
+    expect(it["approvalCanComplete"]).toBe(false);
+    const done = await newRunner().resume(started.run.id, decide(atReview.pendingApproval!.approvalId, "approve"));
+    expect(done.run.status).toBe("incomplete");
+    expect(done.run.outcome).toBe("incomplete:safety_stop");
+    expect(done.run.stopReason).toBe("safety_stop");
+    expect(done.state.stop?.detail).toMatch(/inspection_unavailable/);
+  });
+
+  it("a review finding that is NOT a safety condition is still the human's to approve over", async () => {
+    // A false claim: verification disagrees with the agent, the review
+    // withholds pass, completion lists blockers - and the human may still
+    // approve, because nothing about the control environment was violated.
+    const agent = new FakeImplementationAgent({
+      steps: [{ kind: "write", path: "src/a.ts", contents: "export const a = 2;\n" }],
+      repoRoot: repo,
+      claimFiles: ["src/a.ts", "src/ghost.ts"],
+    });
+    const started = await newRunner({ agent }).start("proj", "bump a");
+    const atReview = await iterateToReviewGate(started.run.id, started.pendingApproval!, { agent });
+    const it = atReview.pendingApproval!.payload["iteration"] as Record<string, unknown>;
+    expect(it["safetyConditions"]).toEqual([]);
+    expect(it["approvalCanComplete"]).toBe(true);
+    expect((it["completion"] as { blockers: string[] }).blockers.length).toBeGreaterThan(0);
+    const done = await newRunner({ agent }).resume(started.run.id, decide(atReview.pendingApproval!.approvalId, "approve"));
+    expect(done.run.status).toBe("completed");
+    expect(done.run.outcome).toBe("approved");
+    expect(done.run.stopReason).toBe("human_approved");
+  });
+
   it("no iteration can mint git.mutate, process.execute or network.access", () => {
     for (const capability of ["git.mutate", "process.execute", "network.access"] as const) {
       expect(() => issueGrant({
@@ -842,8 +961,18 @@ describe("failure never becomes success", () => {
 // ===========================================================================
 describe("the loop decision, as a pure function", () => {
   const owner = { decidedBy: "owner" } as const;
-  it("follows the documented precedence", () => {
+  it("follows the documented precedence: safety, then the human, then the bound", () => {
+    /**
+     * CORRECTED AFTER INDEPENDENT REVIEW. This assertion used to read
+     * `human_approved` for an approval over scope drift - it encoded the
+     * defect as expected behaviour. A verification-observed safety condition
+     * is terminal; the human's decision is recorded but cannot complete the run.
+     */
     expect(decideNextIteration({ iteration: 1, limit: 3, reviewDecision: { kind: "approve", ...owner }, safety: ["scope_drift"] }))
+      .toMatchObject({ kind: "stop", reason: "safety_stop", decidedBy: "owner" });
+    expect(decideNextIteration({ iteration: 1, limit: 3, reviewDecision: { kind: "reject", ...owner }, safety: ["scope_drift"] }))
+      .toMatchObject({ kind: "stop", reason: "safety_stop" });
+    expect(decideNextIteration({ iteration: 1, limit: 3, reviewDecision: { kind: "approve", ...owner }, safety: [] }))
       .toMatchObject({ kind: "stop", reason: "human_approved" });
     expect(decideNextIteration({ iteration: 1, limit: 3, reviewDecision: { kind: "reject", ...owner }, safety: [] }))
       .toMatchObject({ kind: "stop", reason: "human_rejected" });
@@ -857,6 +986,29 @@ describe("the loop decision, as a pure function", () => {
       .toMatchObject({ kind: "stop", reason: "iteration_limit_reached" });
     expect(decideNextIteration({ iteration: 1, limit: 3, reviewDecision: null, safety: [] }))
       .toMatchObject({ kind: "stop", reason: "safety_stop" });
+  });
+
+  it("SAFETY CANNOT BE OVERRIDDEN BY APPROVAL - every condition, approve and reject alike", () => {
+    const conditions = [
+      "unauthorised_git_mutation", "check_policy_changed", "check_integrity_blocked",
+      "checks_changed_repository", "scope_drift", "inspection_unavailable",
+    ] as const;
+    for (const condition of conditions) {
+      for (const kind of ["approve", "reject", "feedback", "edit"] as const) {
+        const d = decideNextIteration({ iteration: 1, limit: 3, reviewDecision: { kind, ...owner }, safety: [condition] });
+        expect(d.kind).toBe("stop");
+        if (d.kind !== "stop") continue;
+        expect(d.reason).toBe("safety_stop");
+        expect(d.reason).not.toBe("human_approved");
+        expect(d.detail).toContain(condition);
+        expect(d.detail).toContain(`"${kind}" decision is recorded`);
+        expect(d.decidedBy).toBe("owner");
+      }
+    }
+    // And the distinction is kept: a review finding that is NOT a safety
+    // condition does not override the human. Quality is theirs to judge.
+    expect(decideNextIteration({ iteration: 1, limit: 3, reviewDecision: { kind: "approve", ...owner }, safety: [] }))
+      .toMatchObject({ kind: "stop", reason: "human_approved" });
   });
 
   it("refuses an out-of-range limit rather than looping on it", () => {

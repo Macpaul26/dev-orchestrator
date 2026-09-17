@@ -9,6 +9,7 @@ import { EventLog } from "../src/events/log.js";
 import { HumanDecision } from "../src/domain/approval.js";
 import { resolveWithin, PathEscapeError, isWithin } from "../src/persistence/paths.js";
 import { createRegistry } from "../src/tools/registry.js";
+import { initRepo } from "./helpers.js";
 
 let tmp: string;
 let store: ProjectStore;
@@ -31,6 +32,18 @@ beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-"));
   store = new ProjectStore(path.join(tmp, "projects"));
   dbPath = path.join(tmp, "checkpoints.sqlite");
+  /**
+   * UPDATED FOR THE TASK 014 SAFETY CORRECTION, DELIBERATELY.
+   *
+   * This project used to be a bare directory. Since Task 014 a run can only
+   * reach `completed` when verification could observe the repository -
+   * `inspection_unavailable` is a terminal safety condition, and no approval
+   * overrides it - so a project with no repository can never complete. The
+   * fixture now has one, and everything this file proves about gates,
+   * checkpoints, events and isolation is proven on an inspectable project.
+   * The no-repository case has its own test in autonomousLoop.test.ts.
+   */
+  initRepo(path.join(tmp, "alpha-src"));
   store.createProject({
     id: "alpha", name: "Alpha", workingDir: path.join(tmp, "alpha-src"),
     repo: null, checks: [], constraints: [], contextFiles: [],
