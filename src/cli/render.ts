@@ -14,7 +14,12 @@ export function renderRun(result: RunResult): void {
   line(`project  ${run.projectId}`);
   line(`status   ${run.status}`);
   line(`phase    ${run.phase}`);
+  line(`iteration ${String(run.iteration)} of ${String(run.iterationLimit)}`);
+  if (run.stopReason) line(`stopped  ${run.stopReason}`);
   if (run.outcome) line(`outcome  ${run.outcome}`);
+  if (run.status === "incomplete") {
+    line("  INCOMPLETE: nothing was approved. Review the run and start a new one if needed.");
+  }
 }
 
 export function renderApproval(request: ApprovalRequest): void {
@@ -24,6 +29,15 @@ export function renderApproval(request: ApprovalRequest): void {
   line(`  kind        ${request.kind}`);
   line(`  risk        ${request.risk}`);
   line(`  summary     ${request.summary}`);
+  const it = request.payload["iteration"] as Record<string, unknown> | undefined;
+  if (it) {
+    line(`  iteration   ${String(it["iteration"])} of ${String(it["limit"])}`);
+    if (it["anotherIterationPossible"] === false) {
+      line("    NOTE: requesting changes cannot start another iteration (bound exhausted or safety condition)");
+    }
+    const completion = it["completion"] as { blockers?: string[] } | undefined;
+    for (const blocker of completion?.blockers ?? []) line(`    blocker: ${blocker}`);
+  }
   if (request.proposedPlan) {
     line("  plan:");
     for (const step of request.proposedPlan.steps) {

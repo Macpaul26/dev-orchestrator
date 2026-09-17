@@ -148,8 +148,8 @@ export function newGrantId(): string {
  * the audit trail impossible to follow. Deriving it keeps one grant per
  * (run, plan revision).
  */
-export function grantIdFor(runId: string, attempt: number): string {
-  return `grn_${runId}_${attempt}`;
+export function grantIdFor(runId: string, attempt: number, iteration = 1): string {
+  return `grn_${runId}_i${String(iteration)}_${String(attempt)}`;
 }
 
 export interface IssueGrantInput {

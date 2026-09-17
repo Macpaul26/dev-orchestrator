@@ -71,8 +71,11 @@ program
   .description("Start a workflow; runs until it suspends at an approval")
   .requiredOption("--project <id>")
   .requiredOption("--request <text>")
-  .action(async (opts: { project: string; request: string }) => {
-    const runner = new WorkflowRunner(store);
+  .option("--max-iterations <n>", "development iterations this run may perform (trusted configuration)")
+  .action(async (opts: { project: string; request: string; maxIterations?: string }) => {
+    const runner = new WorkflowRunner(store, undefined, {
+      maxIterations: opts.maxIterations === undefined ? undefined : Number(opts.maxIterations),
+    });
     const result = await runner.start(opts.project, opts.request);
     renderRun(result);
     if (result.pendingApproval) {

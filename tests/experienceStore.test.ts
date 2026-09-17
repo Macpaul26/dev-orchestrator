@@ -781,11 +781,15 @@ describe("architecture boundaries", () => {
     // the moment the layer grows.
     const dir = path.resolve(__dirname, "..", "src", "experience");
     const sources = fs.readdirSync(dir).filter((name) => name.endsWith(".ts"));
-    // Grown by Task 010's retrieval layer. The list stays exact so that the
-    // capability/grant/process check below covers every file in the layer.
+    // Grown by Task 010's retrieval layer, and by Task 014's outcome recorder -
+    // the first PRODUCER of experience. The list stays exact so that the
+    // capability/grant/approval/process check below covers every file in the
+    // layer, the producer included: it fired on the recorder's first version,
+    // which imported approval TYPES, and the recorder was reshaped to plain
+    // inputs rather than the guard loosened.
     expect(sources.sort()).toEqual([
       "experienceEvaluator.ts", "experienceRetrieval.ts", "experienceStore.ts",
-      "historicalSignal.ts", "projectQuota.ts", "strategy.ts",
+      "historicalSignal.ts", "outcomeRecorder.ts", "projectQuota.ts", "strategy.ts",
     ]);
 
     for (const name of sources) {

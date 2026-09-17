@@ -41,6 +41,17 @@ export const ApprovalRequest = z.object({
   /** Free-form structured context for the reviewer (e.g. a ReviewReport). */
   payload: z.record(z.string(), z.unknown()).default({}),
   createdAt: z.string().datetime(),
+
+  // ---- Task 014: what, exactly, is being approved --------------------------
+  /** The development iteration this gate belongs to. */
+  iteration: z.number().int().positive().default(1),
+  /**
+   * SHA-256 of the thing at the gate - the plan's canonical bytes, or the
+   * reviewed state as verification observed it. Recorded against the
+   * iteration so an approval can always be read back against exactly what it
+   * covered, and never as a general token.
+   */
+  subjectDigest: z.string().nullable().default(null),
 });
 export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
 
@@ -95,6 +106,13 @@ export function approvalIdFor(
   runId: string,
   kind: ApprovalKind,
   attempt: number,
+  /**
+   * Task 014: the development iteration. Part of the id, so the plan gate of
+   * iteration 2 can never be answered with the decision that opened iteration
+   * 1 - the ids differ, and the runner refuses a mismatch before the graph is
+   * even resumed.
+   */
+  iteration = 1,
 ): string {
-  return `apr_${runId}_${kind}_${attempt}`;
+  return `apr_${runId}_i${String(iteration)}_${kind}_${String(attempt)}`;
 }

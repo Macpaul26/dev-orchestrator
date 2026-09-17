@@ -84,6 +84,28 @@ export const OrchestratorEvent = z.discriminatedUnion("type", [
     durationMs: z.number().nonnegative(),
     at: z.string(),
   }),
+  /**
+   * Task 014: the loop, in the durable history. Counts, ids and a closed
+   * vocabulary of reasons - never a plan, a finding or a model's words.
+   */
+  z.object({
+    type: z.literal("iteration_started"),
+    runId: z.string(), iteration: z.number().int().positive(),
+    iterationId: z.string(), limit: z.number().int().positive(), at: z.string(),
+  }),
+  z.object({
+    type: z.literal("iteration_ended"),
+    runId: z.string(), iteration: z.number().int().positive(),
+    iterationId: z.string(),
+    /** "continue" or a StopReason. */
+    decision: z.string(), detail: z.string(), at: z.string(),
+  }),
+  z.object({
+    type: z.literal("experience_recorded"),
+    runId: z.string(), iterationId: z.string(),
+    recorded: z.boolean(), experienceId: z.string().nullable(),
+    reason: z.string().nullable(), at: z.string(),
+  }),
   z.object({
     type: z.literal("workflow_completed"),
     runId: z.string(), outcome: z.string(), at: z.string(),

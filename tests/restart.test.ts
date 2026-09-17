@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { initRepo } from "./helpers.js";
 
 /**
  * THE POINT OF PHASE 2.
@@ -135,6 +136,73 @@ describe("durable resume across process death", () => {
 
   it("exposes no write-capable tool from the built CLI", () => {
     expect(runCli(["tools"]).stdout).toContain("write capabilities registered: false");
+  });
+});
+
+describe("Task 014 - the loop survives process death between iterations", () => {
+  const runJson = (runId: string): Record<string, unknown> =>
+    JSON.parse(fs.readFileSync(path.join(tmp, "projects", "demo", "runs", `${runId}.json`), "utf8")) as Record<string, unknown>;
+
+  it("carries iteration identity, the bound and the pending approval across five separate processes", () => {
+    // A second iteration needs an INSPECTABLE repository: without one,
+    // verification cannot observe anything and the loop refuses to iterate
+    // blind (safety_stop: inspection_unavailable) - which is the right answer
+    // for the bare directory the other tests use, but not what this proves.
+    initRepo(path.join(tmp, "src"));
+
+    // ---- PROCESS 1: start with a configured bound of 2, suspend at plan gate 1, EXIT ----
+    const p1 = runCli(["start", "--project", "demo", "--request", "Loop me", "--max-iterations", "2"]);
+    const runId = runIdFrom(p1.stdout);
+    expect(p1.stdout).toContain("iteration 1 of 2");
+    expect(runJson(runId)["iterationLimit"]).toBe(2);
+
+    // ---- PROCESS 2: approve plan 1 -> implement/verify/review -> review gate 1 ----
+    const p2 = runCli(["resume", "--run", runId, "--decision", "approve", "--by", "owner"]);
+    expect(p2.stdout).toContain("kind        review");
+    expect(p2.stdout).toContain("iteration   1 of 2");
+
+    // ---- PROCESS 3: ask for changes -> iteration 2 opens at ITS plan gate ----
+    const p3 = runCli(["resume", "--run", runId, "--decision", "feedback", "--comment", "tighter", "--by", "owner"]);
+    expect(p3.stdout).toContain("awaiting_approval");
+    expect(p3.stdout).toContain("kind        plan");
+    expect(p3.stdout).toContain("iteration   2 of 2");
+    const onDisk = runJson(runId);
+    expect(onDisk["iteration"]).toBe(2);
+    expect(onDisk["iterationLimit"]).toBe(2);
+    expect(String(onDisk["pendingApprovalId"])).toMatch(/_i2_plan_0$/);
+
+    // ---- PROCESS 4: approve plan 2 (the CLI answers the CURRENT pending id;
+    // the in-process suite proves the old id is refused) -> review gate 2 ----
+    const p4 = runCli(["resume", "--run", runId, "--decision", "approve", "--by", "owner"]);
+    expect(p4.stdout).toContain("kind        review");
+    expect(p4.stdout).toContain("iteration   2 of 2");
+    expect(p4.stdout).toContain("NOTE: requesting changes cannot start another iteration");
+    expect(runJson(runId)["iteration"]).toBe(2);
+    expect(String(runJson(runId)["pendingApprovalId"])).toMatch(/_i2_review_0$/);
+
+    // ---- PROCESS 5: changes requested again -> bound exhausted -> INCOMPLETE ----
+    const p5 = runCli(["resume", "--run", runId, "--decision", "feedback", "--comment", "again", "--by", "owner"]);
+    expect(p5.stdout).toContain("status   incomplete");
+    expect(p5.stdout).toContain("stopped  iteration_limit_reached");
+    expect(p5.stdout).toContain("INCOMPLETE: nothing was approved");
+    expect(runJson(runId)["status"]).toBe("incomplete");
+    expect(runJson(runId)["outcome"]).toBe("incomplete:iteration_limit_reached");
+
+    const history = runCli(["history", "--run", runId]).stdout
+      .split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const pids = new Set(history.filter((e) => e["type"] === "workflow_resumed").map((e) => e["pid"]));
+    expect(pids.size).toBeGreaterThanOrEqual(4);
+    expect(history.filter((e) => e["type"] === "iteration_started").map((e) => e["iteration"])).toEqual([1, 2]);
+    expect(history.filter((e) => e["type"] === "iteration_ended").map((e) => e["decision"]))
+      .toEqual(["continue", "iteration_limit_reached"]);
+    // Nothing may resume a stopped run.
+    expect(() => runCli(["resume", "--run", runId, "--decision", "approve"])).toThrow();
+  });
+
+  it("refuses a bound above the ceiling before creating a run", () => {
+    expect(() => runCli(["start", "--project", "demo", "--request", "x", "--max-iterations", "1000000"])).toThrow();
+    const runsDir = path.join(tmp, "projects", "demo", "runs");
+    expect(fs.existsSync(runsDir) ? fs.readdirSync(runsDir) : []).toEqual([]);
   });
 });
 

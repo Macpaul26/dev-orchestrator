@@ -13,6 +13,9 @@ import type { CheckPolicy } from "../verification/checkPolicy.js";
 import type { ReasoningRecord, ReasoningFailure } from "../domain/reasoning.js";
 import type { ContextSummary } from "../domain/reasoningContext.js";
 import type { WorkflowPhase } from "../domain/workflow.js";
+import {
+  mergeIterationRecords, type IterationRecord, type IterationRecordPatch, type LoopDecision,
+} from "../domain/iteration.js";
 
 /**
  * The workflow state channels.
@@ -190,8 +193,41 @@ export const OrchestratorState = Annotation.Root({
   outcome: Annotation<string | null>({
     reducer: (_p, n) => n, default: () => null,
   }),
-  /** Number of times the plan has been revised after feedback. */
+  /**
+   * Number of times the plan has been revised after feedback WITHIN the
+   * current iteration. Reset to 0 when a new iteration starts, so an approval
+   * id - (run, iteration, gate, revision) - stays unique and legible.
+   */
   revisions: Annotation<number>({ reducer: (_p, n) => n, default: () => 0 }),
+
+  // ---- Task 014: bounded iteration ----------------------------------------
+  /** The current development iteration. 1-based. Advanced only by next_iteration. */
+  iteration: Annotation<number>({ reducer: (_p, n) => n, default: () => 1 }),
+  /** Deterministic id of the current iteration. See iterationIdFor. */
+  iterationId: Annotation<string>({ reducer: (_p, n) => n, default: () => "" }),
+  /**
+   * THE BOUND. Set once by the runner from trusted configuration.
+   *
+   * The reducer keeps the FIRST value it was given and ignores every later
+   * write. A node - or anything a node was handed by a model - cannot raise
+   * it, lower it, or reset it after a restart, because the channel does not
+   * accept a second value at all.
+   */
+  iterationLimit: Annotation<number | null>({
+    reducer: (prev, next) => prev ?? next, default: () => null,
+  }),
+  /**
+   * The per-iteration index. Upserted by iteration id, ordered by number.
+   * Identifiers, digests, verdicts and decision kinds - never text.
+   */
+  iterations: Annotation<IterationRecord[], IterationRecordPatch[]>({
+    reducer: (prev, next) => mergeIterationRecords(prev, next),
+    default: () => [],
+  }),
+  /** Why the loop stopped. Set exactly once, by next_iteration or a rejection. */
+  stop: Annotation<Extract<LoopDecision, { kind: "stop" }> | null>({
+    reducer: (prev, next) => prev ?? next, default: () => null,
+  }),
 });
 
 export type OrchestratorStateType = typeof OrchestratorState.State;

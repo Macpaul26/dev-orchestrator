@@ -132,10 +132,31 @@ around, and every workflow test asserts the pending approval is the PLAN gate.
 No claim is made that this improves proposals; it establishes the mechanism
 and its boundary. See [docs/PHASE-013.md](docs/PHASE-013.md).
 
-Nothing in the workflow WRITES experience yet, so the store is empty in
-production and the historical signal is "none" on every real run. The workflow
-now READS it - through the plan node, through the signal builder, and nowhere
-else - which Task 012 made true. Tests assert the exact importers, that no
+**Task 014 is implemented: a bounded autonomous development loop under
+mandatory human authorization.**
+
+The graph can now go round. When a human asks for changes at the review gate,
+`next_iteration` - the only node with an edge back into the graph - opens the
+next iteration at `inspect`, from where `plan -> approve_plan` runs exactly as
+on the first pass. Iteration is automated; approval is not: every iteration's
+plan and review meet their human gates, every approval and grant id carries
+the iteration it belongs to, and a previous approval cannot answer a later
+gate. The bound (default 3, ceiling 10) is trusted configuration written into
+a first-value-wins state channel that no model output can reach; exhaustion
+and any verification-observed safety condition stop the run as INCOMPLETE -
+nothing approved, a human must look. The orchestrator refuses to run on its
+own installation. The `learn` node is the first producer of experience, built
+only from trusted evidence and never from the agent's account. Twenty
+mutations - gate removal, approval reuse, model-controlled limits and
+completion, claim substitution, learning authority, grant persistence,
+self-modification, infinite and hidden loops, restart reset, scope inheritance
+- are all caught. No claim is made that iterating improves outcomes. See
+[docs/PHASE-014.md](docs/PHASE-014.md).
+
+Since Task 014 the workflow WRITES experience - one record per iteration,
+after the human's review decision, through the outcome recorder and nowhere
+else. It READS it through the plan node, through the signal builder, and
+nowhere else - which Task 012 made true. Tests assert the exact importers, that no
 model, tool or adapter module reaches any part of the learning layer, and that
 nothing in the learning layer imports reasoning, graph or model code. There is no
 cross-project access and no path from a model to any of it. See
@@ -274,6 +295,7 @@ Tests assert each of those.
 | --- | --- |
 | [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why nothing writes to the store yet |
 | [docs/PHASE-010.md](docs/PHASE-010.md) | Experience retrieval: the query model, the searchable projection and what is deliberately excluded from it, the tokenizer and ranking policy, deterministic total ordering, bounds, incomplete-retrieval semantics, corruption handling, why relevance is not confidence, and why similarity search and reasoning integration are deferred |
+| [docs/PHASE-014.md](docs/PHASE-014.md) | The autonomous loop: the loop definition, the two new nodes and the one edge back, iteration identity, approval binding by id and digest, the trusted bound and its first-value-wins channel, stop conditions and safety conditions, restart and idempotency, failure semantics, the learn step, the self-modification refusal, observability, twenty mutations and twelve end-to-end scenarios |
 | [docs/PHASE-013.md](docs/PHASE-013.md) | Strategy adaptation: a pure function over the historical signal, the posture vocabulary and derivation policy, contradiction-first precedence, the HISTORICAL_STRATEGY provenance at rank 15, the unconditional plan-approval edge, no persistence, historical-text safety re-proven, and eighteen mutations with the five that first survived and why |
 | [docs/PHASE-012.md](docs/PHASE-012.md) | Learning reaches reasoning: the historical signal and its projection, the structural selection policy, the live HISTORICAL_EXPERIENCE provenance and rank, bounds, deterministic ordering, incomplete-data states, the pre-Task-012 fallback, import boundaries, mutation results, and what history is forbidden to influence |
 | [docs/PHASE-011.md](docs/PHASE-011.md) | Learning evaluation and confidence: the recurrence projection and why it is not a serialization, the supporting/contradictory/neutral model, the exact confidence formula and why volume saturates, why no evidence yields no score, why provenance does not weight the result, coverage weighting, mutation results, and why the thresholds remain unvalidated |

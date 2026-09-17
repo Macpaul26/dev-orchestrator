@@ -27,6 +27,10 @@ import type { ImplementationAgent } from "../implementation/runner.js";
 import { ClaudeCodeAgent } from "../adapters/claude-code/agent.js";
 import { configFromEnvironment } from "../adapters/claude-code/config.js";
 import { ActivityJournal } from "../activity/journal.js";
+import {
+  resolveIterationLimit, iterationIdFor, type IterationLimit,
+} from "../domain/iteration.js";
+import { assertNotSelfTarget } from "../security/selfBoundary.js";
 
 export interface RunResult {
   run: TWorkflowRun;
@@ -73,6 +77,16 @@ export class WorkflowRunner {
        * historical adaptation entirely.
        */
       experienceStore?: ExperienceStore | null;
+      /**
+       * Task 014: the most development iterations one run may perform.
+       *
+       * TRUSTED CONFIGURATION. Validated here, against a ceiling in
+       * domain/iteration.ts, and written into the run's state ONCE, into a
+       * channel that refuses every later write. Nothing a model returns can
+       * reach this option: proposals are strict-schema validated and rebuilt
+       * field by field, and no field of a plan is a limit.
+       */
+      maxIterations?: number;
     } = {},
   ) {
     this.ownsCheckpointer = checkpointer === undefined;
@@ -82,10 +96,14 @@ export class WorkflowRunner {
     this.experienceStore = options.experienceStore === undefined
       ? new ExperienceStore()
       : options.experienceStore;
+    // Throws on an invalid value. A bad bound is an operator error to surface
+    // at construction, not something to round down quietly.
+    this.iterationLimit = resolveIterationLimit(options.maxIterations);
   }
 
   private readonly reasoningModel: ReasoningModel | null;
   private readonly experienceStore: ExperienceStore | null;
+  private readonly iterationLimit: IterationLimit;
 
   /**
    * Build the reasoning model, IF an operator configured one.
@@ -190,7 +208,14 @@ export class WorkflowRunner {
 
   /** Begin a new run. Returns as soon as the graph suspends or completes. */
   async start(projectId: string, request: string): Promise<RunResult> {
-    this.store.requireProject(projectId);
+    const project = this.store.requireProject(projectId);
+
+    /**
+     * NOT ON ITSELF. Refused before a run exists, so there is nothing to
+     * resume, nothing to approve and nothing to iterate. See
+     * security/selfBoundary.ts. Checked again in the implement node.
+     */
+    assertNotSelfTarget(project.workingDir);
 
     const runId = newRunId();
     const run = this.store.saveRun(
@@ -202,13 +227,27 @@ export class WorkflowRunner {
         status: "running",
         phase: "understand",
         startedAt: now(),
+        iteration: 1,
+        iterationLimit: this.iterationLimit,
       }),
     );
 
     const log = new EventLog(this.store.historyFile(projectId, runId));
     log.append({ type: "workflow_started", runId, projectId, request, at: now() });
+    log.append({
+      type: "iteration_started", runId, iteration: 1,
+      iterationId: iterationIdFor(runId, 1), limit: this.iterationLimit, at: now(),
+    });
 
-    return this.drive(run, log, { runId, projectId, request });
+    return this.drive(run, log, {
+      runId, projectId, request,
+      // The bound enters state HERE and nowhere else. The channel keeps this
+      // first value and ignores every later one.
+      iterationLimit: this.iterationLimit,
+      iteration: 1,
+      iterationId: iterationIdFor(runId, 1),
+      iterations: [{ iteration: 1, iterationId: iterationIdFor(runId, 1), startedAt: now() }],
+    });
   }
 
   /**
@@ -274,10 +313,14 @@ export class WorkflowRunner {
         approvalId: approval.approvalId, at: now(),
       });
 
+      const partial = result as unknown as Partial<OrchestratorStateType>;
       const suspended = this.store.saveRun({
         ...run, status: "awaiting_approval", phase,
         pendingApprovalId: approval.approvalId,
         pendingApproval: approval,
+        // The loop, visible from the run record without opening the checkpoint.
+        iteration: partial.iteration ?? run.iteration,
+        iterationLimit: partial.iterationLimit ?? run.iterationLimit,
       });
       return { run: suspended, pendingApproval: approval, state: result as object };
     }
@@ -287,14 +330,28 @@ export class WorkflowRunner {
     const outcome = state.outcome ?? "completed";
     log.append({ type: "workflow_completed", runId: run.id, outcome, at: now() });
 
+    /**
+     * THREE TERMINAL STATUSES, NOT TWO.
+     *
+     * A run that stopped because the iteration bound was exhausted, or because
+     * verification observed a safety condition, is `incomplete`. It is not
+     * `completed` - nothing was approved - and it is not `rejected` - no human
+     * said no. It is a state a human has to look at, and the record says so.
+     */
     const finished = this.store.saveRun({
       ...run,
-      status: outcome.startsWith("rejected") ? "rejected" : "completed",
+      status:
+        outcome.startsWith("rejected") ? "rejected"
+        : outcome.startsWith("incomplete") ? "incomplete"
+        : "completed",
       phase: "update_state",
       pendingApprovalId: null,
       pendingApproval: null,
       endedAt: now(),
       outcome,
+      iteration: state.iteration ?? run.iteration,
+      iterationLimit: state.iterationLimit ?? run.iterationLimit,
+      stopReason: state.stop?.reason ?? null,
     });
     return { run: finished, pendingApproval: null, state };
   }

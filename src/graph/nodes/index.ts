@@ -31,12 +31,24 @@ import {
   ControlledImplementationRunner, NoOpImplementationAgent,
 } from "../../implementation/runner.js";
 import { CancellationToken } from "../../implementation/session.js";
+import {
+  iterationIdFor, planDigest, reviewDigest, assessCompletion, detectSafetyConditions,
+  decideNextIteration, ITERATION_LIMITS, type IterationRecordPatch,
+} from "../../domain/iteration.js";
+import { recordIterationExperience } from "../../experience/outcomeRecorder.js";
+import { selfBoundaryVerdict } from "../../security/selfBoundary.js";
 import type { OrchestratorStateType, OrchestratorUpdate } from "../state.js";
 import type { NodeContext } from "../context.js";
 import { now } from "../../events/log.js";
 
 /**
- * The nine workflow nodes.
+ * The eleven workflow nodes.
+ *
+ * TASK 014 added `learn` and `next_iteration` after the review gate, and made
+ * every approval and grant id carry the ITERATION it belongs to. The two human
+ * gates are exactly where they were; what changed is that the graph can now go
+ * round again - through `inspect`, `plan` and the plan gate - when a human asks
+ * for changes, up to a bound the orchestrator owns.
  *
  * SCOPE AFTER PHASE 3:
  *
@@ -80,6 +92,31 @@ function repositorySummary(state: OrchestratorStateType): Record<string, unknown
     repositoryRootWithinBoundary: repo.repositoryRootWithinBoundary,
     sensitiveFilesExcludedFromDiff: repo.diff?.excludedFiles.length ?? 0,
   };
+}
+
+/** The current iteration's id, derived - never read from anything untrusted. */
+function currentIterationId(state: OrchestratorStateType): string {
+  return iterationIdFor(state.runId, state.iteration);
+}
+
+/** The most recent human decision answering a given approval id, if any. */
+function decisionFor(state: OrchestratorStateType, approvalId: string): THumanDecision | null {
+  for (let i = state.decisions.length - 1; i >= 0; i -= 1) {
+    const d = state.decisions[i];
+    if (d && d.approvalId === approvalId) return d;
+  }
+  return null;
+}
+
+/** When the current iteration started, from its record; now() for a first visit. */
+function iterationStartedAt(state: OrchestratorStateType): string {
+  const id = currentIterationId(state);
+  return state.iterations.find((r) => r.iterationId === id)?.startedAt ?? now();
+}
+
+/** A patch to the iteration index: identity plus only what this node established. */
+function patchIteration(patch: IterationRecordPatch): IterationRecordPatch {
+  return patch;
 }
 
 // 1 ---------------------------------------------------------------- understand
@@ -466,9 +503,18 @@ export const approvePlan = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "approve_plan", at: now() });
 
+    /**
+     * BOUND TO THIS ITERATION AND THIS PLAN.
+     *
+     * The id carries the iteration, so the plan gate of iteration 2 has a
+     * different id from iteration 1's and the runner refuses a decision that
+     * answers the wrong one. The digest names the plan's bytes, so the record
+     * of "what was approved" is checkable, not a boolean.
+     */
+    const digest = planDigest(state.proposedPlan);
     const request = ApprovalRequest.parse({
       // Deterministic: this node body replays on resume. See approvalIdFor.
-      approvalId: approvalIdFor(state.runId, "plan", state.revisions),
+      approvalId: approvalIdFor(state.runId, "plan", state.revisions, state.iteration),
       workflowRunId: state.runId,
       projectId: state.projectId,
       kind: "plan",
@@ -476,8 +522,18 @@ export const approvePlan = (ctx: NodeContext) =>
       risk: state.proposedPlan?.highestRisk ?? "LOW",
       proposedPlan: state.proposedPlan,
       // What the human is shown about the repository they are authorising work on.
-      payload: { repository: repositorySummary(state) },
+      payload: {
+        repository: repositorySummary(state),
+        iteration: {
+          iteration: state.iteration,
+          iterationId: currentIterationId(state),
+          limit: state.iterationLimit ?? ITERATION_LIMITS.defaultMaxIterations,
+          revision: state.revisions,
+        },
+      },
       createdAt: now(),
+      iteration: state.iteration,
+      subjectDigest: digest,
     });
 
     ctx.onApprovalRequested(request);
@@ -494,9 +550,22 @@ export const approvePlan = (ctx: NodeContext) =>
     }
     ctx.onApprovalReceived(decision);
 
+    const iterationRecord = (extra: Partial<IterationRecordPatch>) => patchIteration({
+      iteration: state.iteration, iterationId: currentIterationId(state),
+      startedAt: iterationStartedAt(state),
+      planApprovalId: request.approvalId, planDigest: digest, planDecision: decision.kind,
+      ...extra,
+    });
+
     if (decision.kind === "reject") {
+      const stop = {
+        kind: "stop" as const, reason: "human_rejected" as const, decidedBy: decision.decidedBy,
+        detail: `the plan of iteration ${String(state.iteration)} was rejected by a human`,
+      };
       return {
         decisions: [decision], pendingApprovalId: null,
+        iterations: [iterationRecord({ endedAt: now(), loop: stop })],
+        stop,
         phase: "update_state", outcome: "rejected_at_plan",
       };
     }
@@ -504,6 +573,7 @@ export const approvePlan = (ctx: NodeContext) =>
       // Loop back and replan with the human's commentary recorded.
       return {
         decisions: [decision], pendingApprovalId: null,
+        iterations: [iterationRecord({})],
         phase: "plan", revisions: state.revisions + 1,
       };
     }
@@ -525,7 +595,7 @@ export const approvePlan = (ctx: NodeContext) =>
     const grant = ctx.store.saveGrant(
       issueGrant({
         // Deterministic: this node body replays on resume. See grantIdFor.
-        grantId: grantIdFor(state.runId, state.revisions),
+        grantId: grantIdFor(state.runId, state.revisions, state.iteration),
         projectId: state.projectId,
         runId: state.runId,
         approvalId: request.approvalId,
@@ -552,6 +622,9 @@ export const approvePlan = (ctx: NodeContext) =>
       proposedPlan: approvedPlan,
       grant,
       pendingApprovalId: null,
+      // The digest of what was APPROVED - the edited plan, when the human
+      // edited - not of what was proposed.
+      iterations: [iterationRecord({ planDigest: planDigest(approvedPlan), grantId: grant.grantId })],
       phase: "implement",
     };
   };
@@ -599,6 +672,50 @@ export const implement = (ctx: NodeContext) =>
     if (!state.grant) {
       return unimplemented("No implementation grant exists; nothing was attempted.");
     }
+
+    /**
+     * THE GRANT MUST DESCEND FROM THIS ITERATION'S PLAN APPROVAL.
+     *
+     * A grant is one-shot in the store already; this is the structural check
+     * in front of that. The grant carries the approval id it was minted from,
+     * and the approval id carries the iteration and revision. If they do not
+     * name THIS gate, the grant belongs to some other plan - an earlier
+     * iteration's, typically - and nothing is attempted. A previous approval
+     * is not a token.
+     */
+    const expectedApproval = approvalIdFor(state.runId, "plan", state.revisions, state.iteration);
+    if (state.grant.approvalId !== expectedApproval || state.grant.runId !== state.runId) {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "implement", at: now() });
+      return {
+        implementation: ImplementationReport.parse({
+          runId: state.runId,
+          claimedSummary:
+            `Implementation refused: grant ${state.grant.grantId} descends from approval ` +
+            `${state.grant.approvalId}, not from this iteration's plan approval ` +
+            `${expectedApproval}. A previous approval does not authorise a new plan.`,
+          claimedFiles: [], observedDiff: null, observedFiles: [], observedCommits: [],
+          sessionId: null, turns: 0, verifiedIndependently: false, createdAt: now(),
+        }),
+        grant: null,
+        phase: "verify",
+      } as OrchestratorUpdate;
+    }
+
+    /**
+     * NOT ON ITSELF. Checked again here, at the last trusted point before a
+     * session could be built - the project record may have changed since the
+     * runner refused at start. See security/selfBoundary.ts.
+     */
+    const target = ctx.store.getProject(state.projectId)?.workingDir;
+    const self = target ? selfBoundaryVerdict(target) : { refused: false as const };
+    if (self.refused) {
+      return unimplemented(
+        "Implementation refused: the project's working directory " +
+        `${self.relation === "is" ? "is" : self.relation === "inside" ? "is inside" : "encloses"} ` +
+        "the orchestrator's own installation. The orchestrator does not develop itself.",
+      );
+    }
+
     const agent = ctx.agent ?? new NoOpImplementationAgent();
     if (agent.name === "none") {
       return unimplemented(
@@ -1149,17 +1266,52 @@ export const approveReview = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "approve_review", at: now() });
 
+    /**
+     * BOUND TO THIS ITERATION AND THIS REVIEWED STATE.
+     *
+     * The digest covers the verdicts, the findings and the repository as
+     * verification observed it. A later iteration reviews a different
+     * repository and gets a different id AND a different digest; an approval
+     * of this review can never be read as covering that one.
+     */
+    const digest = reviewDigest(
+      state.reviewReport, state.verification, state.implementation?.observedDiff ?? null,
+    );
+    const drift = state.reviewEvidence?.scope.drift ?? [];
+    const completion = assessCompletion({
+      verification: state.verification, review: state.reviewReport, scopeDrift: drift,
+      implementationStatus: state.implementationRun?.status ?? null,
+    });
+    const safety = detectSafetyConditions(state.verification, drift);
     const request = ApprovalRequest.parse({
-      approvalId: approvalIdFor(state.runId, "review", state.revisions),
+      approvalId: approvalIdFor(state.runId, "review", state.revisions, state.iteration),
       workflowRunId: state.runId,
       projectId: state.projectId,
       kind: "review",
       summary: `Review verdict: ${state.reviewReport?.verdict ?? "unknown"}`,
       risk: "HIGH",
       proposedPlan: null,
+      iteration: state.iteration,
+      subjectDigest: digest,
       payload: {
         review: state.reviewReport ?? {},
         repository: repositorySummary(state),
+        /**
+         * The loop, as the human sees it at this gate: where this run is,
+         * what trusted evidence says still blocks completion, and what would
+         * happen if they ask for changes. Information for a decision - the
+         * decision itself is theirs.
+         */
+        iteration: {
+          iteration: state.iteration,
+          iterationId: currentIterationId(state),
+          limit: state.iterationLimit ?? ITERATION_LIMITS.defaultMaxIterations,
+          anotherIterationPossible:
+            state.iteration < (state.iterationLimit ?? ITERATION_LIMITS.defaultMaxIterations)
+            && safety.length === 0,
+          safetyConditions: safety,
+          completion,
+        },
         // The independent-verification headline, so approval is an informed act.
         verification: {
           // The four-part outcome, so the human sees process, claim,
@@ -1230,13 +1382,204 @@ export const approveReview = (ctx: NodeContext) =>
       : decision.kind === "reject" ? "rejected_at_review"
       : "changes_requested";
 
+    /**
+     * NOT TERMINAL ANY MORE. Every decision - approve, reject, feedback, edit -
+     * goes on to `learn` and then `next_iteration`, which is the one place
+     * that turns a decision kind into an edge. `outcome` is carried for the
+     * run record; it decides nothing by itself.
+     */
     return {
       decisions: [decision], pendingApprovalId: null,
-      phase: "update_state", outcome,
+      iterations: [patchIteration({
+        iteration: state.iteration, iterationId: currentIterationId(state),
+        startedAt: iterationStartedAt(state),
+        verificationVerdict: state.verification?.verdict ?? null,
+        independentlyVerified: state.verification?.independentlyVerified ?? false,
+        reviewVerdict: state.reviewReport?.verdict ?? null,
+        reviewApprovalId: request.approvalId, reviewDigest: digest,
+        reviewDecision: decision.kind,
+        completion, safety,
+      })],
+      phase: "learn", outcome,
     };
   };
 
-// 9 -------------------------------------------------------------- update_state
+// 9 --------------------------------------------------------------------- learn
+/**
+ * LEARN FROM THE OUTCOME (Task 014).
+ *
+ * Writes one experience record for the iteration that just ended, built ONLY
+ * from what trusted code established - see experience/outcomeRecorder.ts for
+ * exactly what goes in and what cannot. Runs after the human's review
+ * decision, so the record carries that decision's kind as its highest source.
+ *
+ * NOTHING HERE HAS AUTHORITY. The write's success or failure is reported in
+ * state and history and changes nothing about what happens next: the loop
+ * decision in `next_iteration` does not read it. An unwritable store yields a
+ * run that iterates exactly as one with a full store would.
+ */
+export const learn = (ctx: NodeContext) =>
+  async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
+    ctx.emit({ type: "node_started", runId: state.runId, node: "learn", at: now() });
+
+    const iterationId = currentIterationId(state);
+    const reviewApprovalId = approvalIdFor(state.runId, "review", state.revisions, state.iteration);
+    const reviewDecision = decisionFor(state, reviewApprovalId);
+    const drift = state.reviewEvidence?.scope.drift ?? [];
+
+    const recording = recordIterationExperience(ctx.experienceStore, {
+      projectId: state.projectId,
+      iterationId,
+      taskType: state.intent || "development_request",
+      // The plan a human approved - `approve_plan` substituted the edited one.
+      // Projected onto plain text: the learning layer gets the words, not the
+      // Plan, and never the decision object.
+      approvedPlan: state.grant && state.proposedPlan
+        ? {
+            summary: state.proposedPlan.summary,
+            steps: state.proposedPlan.steps.map((s) => ({ description: s.description })),
+          }
+        : null,
+      verification: state.verification,
+      review: state.reviewReport,
+      reviewDecision: reviewDecision?.kind ?? null,
+      completionBlockers: assessCompletion({
+        verification: state.verification, review: state.reviewReport, scopeDrift: drift,
+        implementationStatus: state.implementationRun?.status ?? null,
+      }).blockers.length,
+      now: now(),
+    });
+
+    ctx.emit({
+      type: "experience_recorded", runId: state.runId, iterationId,
+      recorded: recording.recorded, experienceId: recording.experienceId,
+      reason: recording.reason, at: now(),
+    });
+    ctx.emit({ type: "node_completed", runId: state.runId, node: "learn", at: now() });
+    return {
+      iterations: [patchIteration({
+        iteration: state.iteration, iterationId, startedAt: iterationStartedAt(state),
+        experience: recording,
+      })],
+      phase: "next_iteration",
+    };
+  };
+
+// 10 ----------------------------------------------------------- next_iteration
+/**
+ * THE LOOP DECISION - THE ONLY NODE WITH AN EDGE BACK INTO THE GRAPH.
+ *
+ * Reads trusted state and nothing else: the human's recorded review decision
+ * for THIS iteration's review approval id, the safety conditions verification
+ * observed, and the iteration counter against the limit the runner set. It
+ * then either
+ *
+ *   STOPS   - records why, in a closed vocabulary, and hands over to
+ *             update_state; or
+ *   CONTINUES - opens iteration N+1 with every per-iteration channel cleared,
+ *             so nothing from iteration N (its plan, its grant, its
+ *             verification, its review) can be mistaken for N+1's, and routes
+ *             to `inspect`. From there the graph runs plan -> approve_plan
+ *             exactly as on the first pass. There is no edge from here to
+ *             `implement`.
+ *
+ * It cannot approve, reject, grant or widen. It cannot raise the limit: the
+ * channel refuses a second value. It cannot be told the task is complete: no
+ * input carries such a claim.
+ */
+export const nextIteration = (ctx: NodeContext) =>
+  async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
+    ctx.emit({ type: "node_started", runId: state.runId, node: "next_iteration", at: now() });
+
+    const iterationId = currentIterationId(state);
+    const limit = state.iterationLimit ?? ITERATION_LIMITS.defaultMaxIterations;
+    const reviewApprovalId = approvalIdFor(state.runId, "review", state.revisions, state.iteration);
+    const reviewDecision = decisionFor(state, reviewApprovalId);
+    const drift = state.reviewEvidence?.scope.drift ?? [];
+    const safety = detectSafetyConditions(state.verification, drift);
+
+    const decision = decideNextIteration({
+      iteration: state.iteration,
+      limit,
+      reviewDecision: reviewDecision
+        ? { kind: reviewDecision.kind, decidedBy: reviewDecision.decidedBy }
+        : null,
+      safety,
+    });
+
+    ctx.emit({
+      type: "iteration_ended", runId: state.runId, iteration: state.iteration, iterationId,
+      decision: decision.kind === "continue" ? "continue" : decision.reason,
+      detail: decision.kind === "continue"
+        ? `iteration ${String(decision.nextIteration)} of ${String(decision.limit)} follows`
+        : decision.detail,
+      at: now(),
+    });
+
+    if (decision.kind === "stop") {
+      ctx.emit({ type: "node_completed", runId: state.runId, node: "next_iteration", at: now() });
+      const outcome =
+        decision.reason === "human_approved" ? "approved"
+        : decision.reason === "human_rejected" ? "rejected_at_review"
+        : `incomplete:${decision.reason}`;
+      return {
+        iterations: [patchIteration({
+          iteration: state.iteration, iterationId, startedAt: iterationStartedAt(state),
+          endedAt: now(), loop: decision,
+        })],
+        stop: decision,
+        phase: "update_state",
+        outcome,
+      };
+    }
+
+    const next = decision.nextIteration;
+    const nextId = iterationIdFor(state.runId, next);
+    ctx.emit({
+      type: "iteration_started", runId: state.runId, iteration: next, iterationId: nextId,
+      limit: decision.limit, at: now(),
+    });
+    ctx.emit({ type: "node_completed", runId: state.runId, node: "next_iteration", at: now() });
+
+    return {
+      iterations: [
+        patchIteration({
+          iteration: state.iteration, iterationId, startedAt: iterationStartedAt(state),
+          endedAt: now(), loop: decision,
+        }),
+        patchIteration({ iteration: next, iterationId: nextId, startedAt: now() }),
+      ],
+      iteration: next,
+      iterationId: nextId,
+      revisions: 0,
+      observations: [`iteration ${String(next)} of ${String(decision.limit)} started`],
+      // ---- everything that belonged to the iteration that just ended ------
+      proposedPlan: null,
+      grant: null,
+      implementation: null,
+      implementationRun: null,
+      agentClaimedSuccess: false,
+      verification: null,
+      reviewEvidence: null,
+      reviewReport: null,
+      checkRun: null,
+      checkResults: [],
+      reasoning: null,
+      reasoningFailure: null,
+      reasoningNotes: [],
+      contextSummary: null,
+      historicalSummary: null,
+      strategySummary: null,
+      // Re-captured by inspect: the repository changed, and so may the checks.
+      repository: null,
+      inspectionFailure: null,
+      checkPolicy: null,
+      outcome: null,
+      phase: "inspect",
+    } as OrchestratorUpdate;
+  };
+
+// 11 ------------------------------------------------------------- update_state
 export const updateState = (ctx: NodeContext) =>
   async (state: OrchestratorStateType): Promise<OrchestratorUpdate> => {
     ctx.emit({ type: "node_started", runId: state.runId, node: "update_state", at: now() });

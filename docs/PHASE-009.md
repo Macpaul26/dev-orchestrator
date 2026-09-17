@@ -19,9 +19,11 @@ PROJECT → EpisodicExperience → SECURE PERSISTENCE ← Task 009 stops here
         → future sanitisation → PortableLesson
 ```
 
-Nothing currently writes or reads experience in the workflow. The store exists,
-is tested, and is deliberately unwired — a test asserts no production module
-imports it. Task 010 owns retrieval; a producer arrives with it.
+As written at Task 009, nothing in the workflow wrote or read experience. That
+changed by design: Task 012 reads it (through the plan node and the signal
+builder only) and Task 014 writes it (one record per iteration, through
+`experience/outcomeRecorder.ts` only, after the human's review decision). The
+import guard in `tests/experienceFoundation.test.ts` lists the exact consumers.
 
 ---
 

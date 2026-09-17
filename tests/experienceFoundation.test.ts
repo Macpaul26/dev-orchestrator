@@ -461,10 +461,21 @@ describe("the foundation is architecture only", () => {
      * beside `experience.ts` and import it relatively, so they do not match this
      * specifier.
      */
+    /**
+     * UPDATED FOR TASK 014, DELIBERATELY.
+     *
+     * The outcome recorder is the first PRODUCER of experience - the `learn`
+     * node writes one record per iteration through it, built only from what
+     * trusted code observed. The guard fired exactly as designed. The list
+     * stays EXACT: the recorder is the only module in `src/` that may build a
+     * record, and it has no handle on a grant, an approval, a scope or a
+     * limit - see experience/outcomeRecorder.ts.
+     */
     expect(importers.sort()).toEqual([
       "experience/experienceEvaluator.ts",
       "experience/experienceRetrieval.ts",
       "experience/experienceStore.ts",
+      "experience/outcomeRecorder.ts",
     ]);
   });
 
