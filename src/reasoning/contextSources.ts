@@ -6,6 +6,7 @@ import { CONTEXT_LIMITS } from "../domain/reasoningContext.js";
 import {
   HISTORICAL_SIGNAL_LIMITS, type HistoricalSignal, type HistoricalItem,
 } from "../domain/historicalSignal.js";
+import { STRATEGY_LIMITS, type StrategyProposal } from "../domain/strategy.js";
 import type { ContextInput } from "./context.js";
 
 /**
@@ -232,6 +233,35 @@ export function historicalExperience(
       // that reaches the assembler is the text the budget was computed on.
       text: render(item),
     }));
+}
+
+/**
+ * A derived strategy posture, as a context record (Task 013).
+ *
+ * Same discipline as `historicalExperience`: this file imports the proposal
+ * TYPE and nothing else from the learning layer. It renders what the workflow
+ * already derived; it derives nothing, fetches nothing, and has no other door.
+ * The record goes through the same assembler as every other fact.
+ *
+ * Only a `proposal` renders. `unavailable`, `none` and `insufficient` render
+ * NOTHING into the model's context - each is a fact for the human at the gate,
+ * carried in the summary, and not a sentence a model might reason from. A
+ * rendering over `maxRenderedChars` is also omitted rather than shortened:
+ * the assembler would refuse a record over its bound, and a strategy is not
+ * critical context, so absence is the correct failure direction.
+ */
+export function historicalStrategy(
+  proposal: StrategyProposal,
+  render: (proposal: StrategyProposal) => string | null,
+): ContextInput[] {
+  const text = render(proposal);
+  if (text === null || text.length > STRATEGY_LIMITS.maxRenderedChars) return [];
+  return [{
+    provenance: "HISTORICAL_STRATEGY" as const,
+    // One posture per context, keyed by what it is rather than by any content.
+    key: "strategy.posture",
+    text,
+  }];
 }
 
 /**

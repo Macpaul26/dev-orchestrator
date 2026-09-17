@@ -15,11 +15,13 @@ import { planFromProposal } from "../../reasoning/proposal.js";
 import { assembleContext, detectAuthorityConflicts } from "../../reasoning/context.js";
 import { HistoricalSignalBuilder, renderHistoricalItem } from "../../experience/historicalSignal.js";
 import { HistoricalSignal, summariseHistoricalSignal } from "../../domain/historicalSignal.js";
+import { deriveStrategy, renderStrategy } from "../../experience/strategy.js";
+import { summariseStrategy } from "../../domain/strategy.js";
 import { buildUserPrompt } from "../../reasoning/prompt.js";
 import {
   projectMetadata, humanDecisions, humanConstraints,
   repositoryObservations, taskDescription, historicalAgentClaims,
-  repositoryEvidence, historicalExperience,
+  repositoryEvidence, historicalExperience, historicalStrategy,
 } from "../../reasoning/contextSources.js";
 import { summariseContext } from "../../domain/reasoningContext.js";
 import { isBlocking, VerificationOutcome } from "../../domain/verification.js";
@@ -292,6 +294,19 @@ export const plan = (ctx: NodeContext) =>
       : HistoricalSignal.parse({ kind: "unavailable", reason: "no_store" });
     const historicalSummary = summariseHistoricalSignal(history);
 
+    /**
+     * DERIVED STRATEGY POSTURE (Task 013).
+     *
+     * A pure function of the signal above - it reads no store, no evaluator,
+     * no model. It summarises evidence that already crossed the Task 012
+     * boundary into one posture, and enters the SAME assembler at a rank below
+     * the evidence it summarises. It is information for the proposal; it
+     * approves, grants, widens, lowers, skips and executes nothing, and the
+     * human gate below is exactly where it was.
+     */
+    const strategy = deriveStrategy(history);
+    const strategySummary = summariseStrategy(strategy);
+
     const assembled = assembleContext([
       ...projectMetadata(project),
       ...humanDecisions(ctx.store.listDecisions(state.projectId)),
@@ -304,6 +319,7 @@ export const plan = (ctx: NodeContext) =>
       ...historicalAgentClaims(ctx.store.listImplementations(state.projectId)),
       // Same assembler, same checks, same fence. Learning has no other door.
       ...historicalExperience(history, renderHistoricalItem),
+      ...historicalStrategy(strategy, renderStrategy),
     ]);
 
     /**
@@ -326,6 +342,7 @@ export const plan = (ctx: NodeContext) =>
         ),
         reasoningNotes: [`context assembly failed: ${assembled.failure.code}`],
         historicalSummary,
+        strategySummary,
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -360,6 +377,7 @@ export const plan = (ctx: NodeContext) =>
         reasoningNotes: ["context rendering failed: over the transport limit"],
         contextSummary: summariseContext(assembled.context),
         historicalSummary,
+        strategySummary,
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -397,6 +415,7 @@ export const plan = (ctx: NodeContext) =>
         reasoningNotes: [`reasoning unavailable: ${result.failure.code}`],
         contextSummary: summariseContext(assembled.context),
         historicalSummary,
+        strategySummary,
         phase: "approve_plan",
       } as OrchestratorUpdate;
     }
@@ -429,6 +448,7 @@ export const plan = (ctx: NodeContext) =>
       ],
       contextSummary: summariseContext(assembled.context),
       historicalSummary,
+      strategySummary,
       phase: "approve_plan",
     } as OrchestratorUpdate;
   };

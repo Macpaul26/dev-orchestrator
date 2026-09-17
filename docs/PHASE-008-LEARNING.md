@@ -275,7 +275,7 @@ Experience → AI decides it is better → AI rewrites itself
 | 010 | Experience Retrieval | implemented |
 | 011 | Learning Evaluation + Confidence | implemented |
 | 012 | Adaptive Reasoning / Strategy Improvement | implemented |
-| 013 | Controlled Self-Improvement | not started |
+| 013 | Controlled Self-Improvement | implemented |
 | 014 | End-to-End Autonomous Development Loop | not started |
 
 Numbering may shift; the progression must not. Each step is separately scoped

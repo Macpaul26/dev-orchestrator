@@ -382,16 +382,20 @@ describe("the live authority model matches the declared intent", () => {
     expect(PROVENANCE_RANK[INTENDED_EXPERIENCE_PROVENANCE]).toBe(INTENDED_EXPERIENCE_RANK);
   });
 
-  it("keeps the seven provenance classes and their order", () => {
+  it("keeps the eight provenance classes and their order", () => {
+    // UPDATED FOR TASK 013: HISTORICAL_STRATEGY joins, below the experience
+    // it summarises and above a bare agent claim.
     expect([...ContextProvenance.options].sort()).toEqual([
-      "HISTORICAL_AGENT_CLAIM", "HISTORICAL_EXPERIENCE", "HUMAN_CONSTRAINT",
-      "HUMAN_DECISION", "PROJECT_METADATA", "REPOSITORY_OBSERVATION",
-      "TASK_DESCRIPTION",
+      "HISTORICAL_AGENT_CLAIM", "HISTORICAL_EXPERIENCE", "HISTORICAL_STRATEGY",
+      "HUMAN_CONSTRAINT", "HUMAN_DECISION", "PROJECT_METADATA",
+      "REPOSITORY_OBSERVATION", "TASK_DESCRIPTION",
     ]);
-    // Historical experience sits above a bare agent claim and below the task.
     expect(PROVENANCE_RANK.TASK_DESCRIPTION)
       .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_EXPERIENCE);
+    // A summary of evidence cannot outrank the evidence.
     expect(PROVENANCE_RANK.HISTORICAL_EXPERIENCE)
+      .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_STRATEGY);
+    expect(PROVENANCE_RANK.HISTORICAL_STRATEGY)
       .toBeGreaterThan(PROVENANCE_RANK.HISTORICAL_AGENT_CLAIM);
     expect(PROVENANCE_RANK.HUMAN_DECISION).toBeGreaterThan(PROVENANCE_RANK.HUMAN_CONSTRAINT);
     expect(PROVENANCE_RANK.HUMAN_CONSTRAINT).toBeGreaterThan(PROVENANCE_RANK.PROJECT_METADATA);

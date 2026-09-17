@@ -785,7 +785,7 @@ describe("architecture boundaries", () => {
     // capability/grant/process check below covers every file in the layer.
     expect(sources.sort()).toEqual([
       "experienceEvaluator.ts", "experienceRetrieval.ts", "experienceStore.ts",
-      "historicalSignal.ts", "projectQuota.ts",
+      "historicalSignal.ts", "projectQuota.ts", "strategy.ts",
     ]);
 
     for (const name of sources) {

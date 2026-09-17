@@ -70,7 +70,7 @@ afterEach(() => {
 
 // ===========================================================================
 describe("A - provenance", () => {
-  it("supports all seven provenance types and renders each distinctly", () => {
+  it("supports all eight provenance types and renders each distinctly", () => {
     const context = assembled([
       record("PROJECT_METADATA", "p", "Project name: Demo"),
       record("HUMAN_DECISION", "d", "Use PostgreSQL."),
@@ -80,8 +80,10 @@ describe("A - provenance", () => {
       record("HISTORICAL_AGENT_CLAIM", "h", "Previous implementation reported success."),
       // Task 012: evaluated historical experience, labelled as exactly that.
       record("HISTORICAL_EXPERIENCE", "e", "Earlier work recorded an approach."),
+      // Task 013: a derived posture, labelled as derived and nothing stronger.
+      record("HISTORICAL_STRATEGY", "s", "Derived strategy posture: ESTABLISHED."),
     ]);
-    expect(context.records).toHaveLength(7);
+    expect(context.records).toHaveLength(8);
 
     const rendered = renderContext(context);
     for (const provenance of ContextProvenance.options) {

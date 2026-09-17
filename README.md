@@ -119,6 +119,19 @@ grants nothing and skips nothing; the model still proposes, and the human still
 decides. "History could not be inspected" is recorded for the human and never
 rendered as "there is no history". See [docs/PHASE-012.md](docs/PHASE-012.md).
 
+**Task 013 is implemented: controlled strategy adaptation.**
+
+A pure function over the Task 012 signal - no store, no evaluator, no model,
+no clock - aggregates the evaluated history into one bounded posture:
+ESTABLISHED, CAUTIONARY, CONTESTED or INCONCLUSIVE. Contradiction is checked
+first, so repeated success can never erase an independently supported failure.
+The posture enters the same assembler at a rank BELOW the evidence it
+summarises, and it approves, grants, widens, lowers, skips, persists and
+executes nothing - the human gate is a graph edge the plan node cannot route
+around, and every workflow test asserts the pending approval is the PLAN gate.
+No claim is made that this improves proposals; it establishes the mechanism
+and its boundary. See [docs/PHASE-013.md](docs/PHASE-013.md).
+
 Nothing in the workflow WRITES experience yet, so the store is empty in
 production and the historical signal is "none" on every real run. The workflow
 now READS it - through the plan node, through the signal builder, and nowhere
@@ -134,10 +147,11 @@ The long-term goal is a system that improves its own planning, implementation
 and verification strategy by learning from outcomes it independently verified -
 never from what an agent claimed. `src/domain/experience.ts` fixes the shape;
 Task 009 built the store, Task 010 retrieval, Task 011 evaluation and
-confidence, and Task 012 the one route from evaluated experience into the
-reasoning prompt. What does NOT exist is anything that ACTS on it: no strategy
-learning, no self-improvement, no automatic execution of a historically
-successful approach, and no change to any authority boundary.
+confidence, Task 012 the one route from evaluated experience into the
+reasoning prompt, and Task 013 a derived posture over it. What does NOT exist is
+anything that ACTS on any of it: no automatic execution of a historically
+successful approach, no self-modification, and no change to any authority
+boundary.
 
 The invariant it exists to protect: **learning informs reasoning, and never
 becomes authority.** A lesson from a hundred verified runs is still text from
@@ -260,6 +274,7 @@ Tests assert each of those.
 | --- | --- |
 | [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why nothing writes to the store yet |
 | [docs/PHASE-010.md](docs/PHASE-010.md) | Experience retrieval: the query model, the searchable projection and what is deliberately excluded from it, the tokenizer and ranking policy, deterministic total ordering, bounds, incomplete-retrieval semantics, corruption handling, why relevance is not confidence, and why similarity search and reasoning integration are deferred |
+| [docs/PHASE-013.md](docs/PHASE-013.md) | Strategy adaptation: a pure function over the historical signal, the posture vocabulary and derivation policy, contradiction-first precedence, the HISTORICAL_STRATEGY provenance at rank 15, the unconditional plan-approval edge, no persistence, historical-text safety re-proven, and eighteen mutations with the five that first survived and why |
 | [docs/PHASE-012.md](docs/PHASE-012.md) | Learning reaches reasoning: the historical signal and its projection, the structural selection policy, the live HISTORICAL_EXPERIENCE provenance and rank, bounds, deterministic ordering, incomplete-data states, the pre-Task-012 fallback, import boundaries, mutation results, and what history is forbidden to influence |
 | [docs/PHASE-011.md](docs/PHASE-011.md) | Learning evaluation and confidence: the recurrence projection and why it is not a serialization, the supporting/contradictory/neutral model, the exact confidence formula and why volume saturates, why no evidence yields no score, why provenance does not weight the result, coverage weighting, mutation results, and why the thresholds remain unvalidated |
 | [docs/PHASE-008-LEARNING.md](docs/PHASE-008-LEARNING.md) | The learning foundation: ARCHITECTURE ONLY - why a lesson can inform a proposal but never authorise one, how a claim differs from a verified outcome, the three memory layers, and the roadmap to Tasks 009-014 |

@@ -1,4 +1,5 @@
 import type { HistoricalSignalSummary } from "../domain/historicalSignal.js";
+import type { StrategySummary } from "../domain/strategy.js";
 import { Annotation } from "@langchain/langgraph";
 import type { Plan, HumanDecision } from "../domain/approval.js";
 import type { ImplementationReport, ReviewReport, CheckResult } from "../domain/reports.js";
@@ -155,6 +156,15 @@ export const OrchestratorState = Annotation.Root({
    * of what was found actually reached the model.
    */
   historicalSummary: Annotation<HistoricalSignalSummary | null>({
+    reducer: (_p, n) => n, default: () => null,
+  }),
+  /**
+   * A BOUNDED SUMMARY of the derived strategy posture (Task 013). Kind,
+   * posture and counts - never the patterns. Not persisted as configuration:
+   * it is workflow state describing what one run derived, and nothing reads
+   * it back to decide anything.
+   */
+  strategySummary: Annotation<StrategySummary | null>({
     reducer: (_p, n) => n, default: () => null,
   }),
   /** Model-proposed paths trusted code refused, and why. Shown to the human. */

@@ -71,6 +71,15 @@ export const ContextProvenance = z.enum([
    * not approve anything, grant anything, widen anything or skip anything.
    */
   "HISTORICAL_EXPERIENCE",
+  /**
+   * A posture derived from evaluated experience (Task 013).
+   *
+   * Produced by trusted code from the Task 012 signal and nothing else - a
+   * pure function of digests, enums and counts. It summarises evidence that
+   * already crossed the Task 012 boundary; it carries no text, no authority,
+   * and no instruction. See PROVENANCE_RANK for why it sits where it does.
+   */
+  "HISTORICAL_STRATEGY",
 ]);
 export type ContextProvenance = z.infer<typeof ContextProvenance>;
 
@@ -110,6 +119,17 @@ export const PROVENANCE_RANK: Readonly<Record<ContextProvenance, number>> = {
    * being asked now.
    */
   HISTORICAL_EXPERIENCE: 20,
+  /**
+   * BELOW the experience it summarises, ABOVE a bare agent claim.
+   *
+   * A summary of evidence cannot outrank the evidence: if the items and the
+   * posture ever disagreed, the items are the primary record. It sits above
+   * HISTORICAL_AGENT_CLAIM because trusted code derived it from independently
+   * admissible evidence, which a bare agent narrative is not. It is below
+   * every human, observed and current source, and it is not critical - the
+   * assembler may drop it to make room and never drops a human record for it.
+   */
+  HISTORICAL_STRATEGY: 15,
   HISTORICAL_AGENT_CLAIM: 10,
 } as const;
 
@@ -156,6 +176,8 @@ export const PROVENANCE_LABEL: Readonly<Record<ContextProvenance, string>> = {
    * it.
    */
   HISTORICAL_EXPERIENCE: "EVALUATED HISTORICAL EXPERIENCE",
+  /** "Derived" says trusted code computed it; "historical" says it is the past. */
+  HISTORICAL_STRATEGY: "DERIVED HISTORICAL STRATEGY",
   HISTORICAL_AGENT_CLAIM: "UNTRUSTED AGENT CLAIM",
 } as const;
 
@@ -185,6 +207,8 @@ export const CONTEXT_LIMITS = {
    * the same number independently so neither side is the only bound.
    */
   maxHistoricalExperience: 5,
+  /** One posture per context. There is only ever one to give. */
+  maxHistoricalStrategy: 1,
   maxTaskDescriptionLength: 4_000,
   maxWarnings: 20,
 } as const;
