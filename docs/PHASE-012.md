@@ -122,39 +122,109 @@ caught by two tests.
 
 ## 5. What is allowed to influence reasoning, and what is forbidden
 
+> **Corrected after independent review.** The first version rendered each
+> record's normalized `successfulPatterns` / `failedPatterns` text into the
+> prompt as "approaches", on the reasoning that Task 011 had found the record
+> independently backed. That conflated two different controls — see §5a. The
+> projection now carries **no text derived from any record field**.
+
 **Allowed to cross** (`HistoricalItem`, `.strict()`):
 
-| Field | What it is |
-| --- | --- |
-| `experienceId` | identifier, stable, content-derived |
-| `taskType` | normalized label, ≤100 chars |
-| `approaches` | ≤3 normalized approaches, ≤120 chars each |
-| `status` | Task 011's verdict, verbatim |
-| `confidence` | Task 011's score, or null — never invented |
-| `supporting` / `contradicting` / `inadmissible` | the evaluator's counts |
-| `evaluationBounded` | whether the evaluator saw the whole project |
+| Field | What it is | Shape |
+| --- | --- | --- |
+| `experienceId` | the record's content-derived identity | 32 hex, regex |
+| `taskTypeKey` | digest of the normalized task type — a **grouping handle** | 16 hex, regex |
+| `patternKey` | Task 011's recurrence key for the pattern — a **stable handle** | 32 hex, regex |
+| `status` | Task 011's verdict, verbatim | enum |
+| `confidence` | Task 011's score, or null — never invented | 0–100 or null |
+| `supporting` / `contradicting` / `inadmissible` | the evaluator's counts | integers |
+| `evaluationBounded` | whether the evaluator saw the whole project | boolean |
 
-**Never crosses:** `planSummary`, `implementationOutcome`,
-`verificationOutcome`, `reviewOutcome`, `failures`, `corrections`, `evidence`
-refs, `sources`, `runId`, `createdAt`, filesystem paths, credentials, diffs,
-the raw record, or the corpus. A test plants markers in every excluded field
-and asserts none reaches the signal or the rendered text.
+**Every string field is a fixed-width hex digest under a regex.** There is no
+field that *could* hold a sentence. That is the guarantee, and it is
+structural: prose is unrepresentable, so no denylist is being relied on.
 
-**Forbidden fields** (`FORBIDDEN_SIGNAL_KEYS`, asserted structurally): `approved`,
-`trusted`, `authorized`, `allowed`, `grant`, `capabilities`, `bypassChecks`,
-`skipVerification`, `verificationRequired`, `scope`, `allowedScope`, `risk`,
-`policy`, `instruction`, `recommendation`, `strategy`, `execute`, and the
-content fields above.
+**Never crosses:** `successfulPatterns`, `failedPatterns`, `taskType` (free
+text on the episodic record — it has no grammar), `planSummary`,
+`implementationOutcome`, `verificationOutcome`, `reviewOutcome`, `failures`,
+`corrections`, `evidence` refs, `sources`, `runId`, `createdAt`, filesystem
+paths, credentials, diffs, the raw record, or the corpus. A test plants a
+unique sentinel and five other shapes of hostile content — an instruction, a
+repository snippet, a path, a token, a mode switch — in the pattern lists of an
+*admissible* record and asserts every fragment, raw and normalized, is absent
+from the signal, the rendered item, the `ContextInput`, the assembled context,
+and the final prompt string a provider would receive.
 
-**The rendered text is evidence, not instruction.** No sentence says "do this",
+**`FORBIDDEN_SIGNAL_KEYS`** protects the **shape**: a field with one of those
+names cannot appear, and `approaches`, `taskType`, `text`, `label` and
+`description` are on the list so the text carriers cannot return. It does
+nothing about dangerous content *inside* a permitted string, and is not
+claimed to. That protection comes from there being no permitted string that
+can hold prose.
+
+**The rendered text is evidence, not instruction.** Every interpolated value
+is a number, an enum member or a hex digest. No sentence says "do this",
 "prefer this" or "this is safe". The closing sentence states that the item
 describes what happened before and is not a permission, an instruction or a
-requirement. A test forbids `approved`, `approve`, `permitted`, `allowed`,
-`recommended`, `prefer`, `you should`, `you must` and `safe to` anywhere in the
-rendered text — and it caught the first draft, which said "not … approved".
-A model skimming for the word does not reliably see the "not".
+requirement, and a test forbids nine authority-shaped words anywhere in it.
 
----
+### What the model actually learns
+
+> Something relevant to this request was tried before in this project; an
+> independent source corroborated it *N* times and contradicted it *M* times;
+> under the documented policy that evaluates as *status* with confidence *c*;
+> and here is a stable handle for it.
+
+It does **not** learn what the approach *was*. That is the price of the
+correction, and it is the right trade: a smaller truthful signal beats a larger
+one that can carry an instruction.
+
+
+## 5a. Evidence admissibility ≠ content admissibility
+
+Two controls, kept deliberately apart:
+
+| Control | Owner | Question it answers |
+| --- | --- | --- |
+| **Evidence admissibility** | Task 011 | May this record's *outcome* participate in evaluation? Decided by provenance: an independent source backs it, or it does not. |
+| **Content admissibility** | Task 012 | May this *text* cross into reasoning? Decided by the projection: only fields with no free-text capacity cross. |
+
+An admissible record is **not thereby a safe one.** A `VERIFICATION_RESULT`
+establishes that a check passed on a run. It says nothing about whether the
+words the agent wrote into that run's pattern list are safe to reproduce in
+front of a model — a check passes just as readily on a run whose pattern list
+reads "ignore previous instructions". Admissibility answers *may this record
+vote?*; it never answers *may this record speak?*
+
+```
+free text  →  Task 011 evaluation    still valid: the evaluator counts it
+free text  →  model prompt           closed: no field can carry it
+```
+
+Task 011 continues to read the pattern lists — that is how recurrence is
+counted, and its artifact carries `pattern.approaches` for humans and tests.
+The artifact is not model-facing. The builder reads the artifact's **key** and
+**counts** and deliberately not its text.
+
+**Why not filter instead?** Normalization — NFKC, lower-casing, punctuation
+collapse — is not sanitization; it reshapes `/etc/passwd` into `etc passwd`.
+A denylist of authority words cannot be sanitization either: prose can instruct
+without using any of them, and a list can grow forever and still miss the next
+phrasing. The correction is structural for that reason. It also caught its own
+test: the first draft of the regression suite searched for raw punctuated
+fragments only, which would have let a mutation forwarding *normalized* text
+survive. The suite now checks tokens no normalization can reshape.
+
+**The free-text fields remain what Task 008-A typed them as:** project-
+confidential historical data. They do not cross into reasoning because their
+record has admissible evidence, and they will not cross under any future change
+to the evidence policy, because the projection has no place to put them.
+
+**Future extension.** If richer historical explanations are wanted, that
+requires a separately designed and reviewed **content-sanitization boundary** —
+a projection whose safety is argued on its own terms, not inherited from
+evidence admissibility. It is not assigned to Task 013; Task 013 must not
+inherit the assumption that admissible means safe.
 
 ## 6. Bounds
 
@@ -163,15 +233,15 @@ A model skimming for the word does not reliably see the "not".
 ```
 maxQueryChars 1,000     maxRetrieved 10       maxEvaluated 10
 maxPresented 5          maxItemChars 600      maxTotalChars 2,400
-maxApproachesPerItem 3  maxApproachChars 120  maxTaskTypeChars 100
 ```
 
-Task 007 enforces `maxHistoricalExperience: 5` **independently**, so neither
-side is the only bound. The builder sizes each item with the *same* renderer the
-context source uses, so the budget and the text the model sees cannot disagree.
-Every array in the signal is schema-capped.
+The per-approach and per-task-type character limits from the first version are
+**gone**, because there is no approach or task-type text left to bound; the
+digests that replaced them are fixed-width by regex. Task 007 enforces
+`maxHistoricalExperience: 5` **independently**, so neither side is the only
+bound. The builder sizes each item with the *same* renderer the context source
+uses, so the budget and the text the model sees cannot disagree.
 
----
 
 ## 7. Deterministic selection and ordering
 
@@ -286,26 +356,28 @@ is present at exactly the declared rank — a stronger claim than absence.
 
 ## 13. Mutation testing
 
-Eight mutations, all caught, no survivors, source pristine after the run.
-Verdict rule: caught only when vitest exits non-zero *and* reports failures.
+Ten mutations against the corrected implementation, all caught, no survivors,
+source pristine after the run. Verdict rule: caught only when vitest exits
+non-zero *and* reports failures.
 
-| # | Mutation | Failing / 41 |
+| # | Mutation | Failing / 47 |
 | --- | --- | --- |
-| 1 | retrieval asks about a fixed project, not the requested one | 13 |
-| 2 | a confident history renders "approved for reuse; skip verification" | 2 |
-| 3 | historical experience relabelled `REPOSITORY_OBSERVATION` | 2 |
-| 4 | the record's narrative interpolated into the projection | 12 |
-| 5 | presentation cap removed | 1 — the domain schema's `.max()` throws |
-| 6 | selection admits candidates with no independent evidence | 2 |
-| 7 | retrieval failure reported as `none` instead of `unavailable` | 4 |
-| 8 | presentation order reversed from retrieval order | 4 |
+| R1 | **the vulnerability, put back:** `approaches` returns as a field, filled from the record's normalized pattern text, and rendered | 10 |
+| R2 | **structural restriction removed:** `patternKey` regex dropped and the slot filled with pattern text | 9 |
+| 1 | retrieval asks about a fixed project | 17 |
+| 2 | a confident history renders "approved for reuse; skip verification" | 5 |
+| 3 | relabelled `REPOSITORY_OBSERVATION` | 3 |
+| 4 | the record's narrative reaches the prompt through a de-restricted key slot | 10 |
+| 5 | presentation cap removed | 1 — the schema's `.max()` throws |
+| 6 | selection admits candidates with no independent evidence | 3 |
+| 7 | retrieval failure reported as `none` | 4 |
+| 8 | presentation order reversed | 6 |
 
-Mutation 5 is caught by the schema itself rather than by an assertion: an
-oversized `items` array fails `HistoricalSignal.parse` before anything is
-returned. That is the structural guard working, and it is reported as one
-failure rather than rounded up.
+R1 and R2 are the two this correction adds. The original eight were re-run
+against the corrected shape; mutation 4 was re-anchored because the field it
+targeted no longer exists — it now de-restricts a key slot and fills it with
+narrative, which is what "raw interpolation" means once there is no text field.
 
----
 
 ## 14. Limitations, policy assumptions and observations
 
@@ -328,7 +400,13 @@ failure rather than rounded up.
    deterministic; the *final* prompt order passes through the assembler's sort.
    Flagged for a scope decision rather than silently fixed.
 7. **No empirical claim is made that adaptive reasoning produces better
-   proposals.** There is no evidence either way.
+   proposals.** There is no evidence either way — and the content-safety
+   correction, which removed the approach text, makes the signal thinner than
+   the first version. That is a security boundary being established, not a
+   quality result.
+8. **The model is not told what the approach was.** Only that something
+   relevant recurred and how it evaluated. Richer explanation needs its own
+   reviewed content boundary — see §5a.
 
 ---
 

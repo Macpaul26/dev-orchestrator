@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   HistoricalSignal, HISTORICAL_SIGNAL_LIMITS,
   type HistoricalSignal as THistoricalSignal,
@@ -151,12 +152,19 @@ export class HistoricalSignalBuilder {
         continue;
       }
 
+      /**
+       * NO TEXT FROM THE RECORD CROSSES HERE. `artifact.pattern.approaches` and
+       * `artifact.pattern.taskType` are available on the evaluation artifact -
+       * Task 011 needs them - and are deliberately not read into the item. The
+       * two identifiers are digests: content-derived, stable, and incapable of
+       * carrying a sentence. See the header of domain/historicalSignal.ts for
+       * why an admissible record is not thereby a safe one.
+       */
       const item: THistoricalItem = {
         experienceId: candidate.id,
-        taskType: artifact.pattern.taskType.slice(0, HISTORICAL_SIGNAL_LIMITS.maxTaskTypeChars),
-        approaches: artifact.pattern.approaches
-          .slice(0, HISTORICAL_SIGNAL_LIMITS.maxApproachesPerItem)
-          .map((approach) => approach.slice(0, HISTORICAL_SIGNAL_LIMITS.maxApproachChars)),
+        taskTypeKey: crypto.createHash("sha256")
+          .update(artifact.pattern.taskType, "utf8").digest("hex").slice(0, 16),
+        patternKey: artifact.recurrence.key,
         status: artifact.status,
         confidence: artifact.confidence.score,
         supporting: artifact.recurrence.supporting,
@@ -220,9 +228,6 @@ export class HistoricalSignalBuilder {
  * Deterministic: a pure function of the item, no clock, no locale.
  */
 export function renderHistoricalItem(item: THistoricalItem): string {
-  const approaches = item.approaches.length > 0
-    ? item.approaches.map((approach) => `"${approach}"`).join(", ")
-    : "(no specific approach recorded)";
   const verdict = item.confidence === null
     ? `evaluated status ${item.status}`
     : `evaluated status ${item.status}, confidence ${String(item.confidence)}/100 ` +
@@ -235,8 +240,11 @@ export function renderHistoricalItem(item: THistoricalItem): string {
     ? " The evaluation examined a BOUNDED part of the project's history, not all of it."
     : "";
 
+  // Every interpolated value below is a number, an enum member, or a hex
+  // digest. There is no free text to escape because there is no free text.
   return (
-    `Earlier ${item.taskType} work in this project recorded the approach(es) ${approaches}. ` +
+    `Earlier work in this project on task-type ${item.taskTypeKey} recorded ` +
+    `pattern ${item.patternKey}. ` +
     `Independent evidence: ${String(item.supporting)} supporting, ` +
     `${String(item.contradicting)} contradicting; ${verdict}.${backing}${coverage} ` +
     // No word here is one a model could lift as a permission - not "approved",

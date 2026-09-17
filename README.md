@@ -105,8 +105,9 @@ the artifact sits beside the record and is never written into it. See
 
 The first controlled connection between the learning layer and the reasoning
 model. Trusted workflow code runs retrieval and evaluation over the current
-project's store and hands the Task 007 assembler a bounded projection - task
-type, a few normalized approaches, and the evaluator's counts and verdict. It
+project's store and hands the Task 007 assembler a bounded projection - two
+opaque digests and the evaluator's counts and verdict, and no text from any
+record field at all, because an admissible record is not thereby a safe one. It
 enters through the SAME assembler as every other fact, at a provenance ranked
 below everything a human said, everything the orchestrator observed, and the
 request itself. There is no second prompt path.
