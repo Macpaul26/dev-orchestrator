@@ -9,7 +9,7 @@ import { HistoricalSignalBuilder } from "../src/experience/historicalSignal.js";
 import { deriveStrategy, renderStrategy, comparePatterns } from "../src/experience/strategy.js";
 import {
   StrategyProposal, StrategyPosture, STRATEGY_LIMITS, DERIVATION_POLICY,
-  FORBIDDEN_STRATEGY_KEYS, summariseStrategy,
+  FORBIDDEN_STRATEGY_KEYS, CAPPING_OMISSIONS, summariseStrategy,
 } from "../src/domain/strategy.js";
 import { HistoricalSignal, HistoricalItem } from "../src/domain/historicalSignal.js";
 import { historicalStrategy } from "../src/reasoning/contextSources.js";
@@ -241,6 +241,163 @@ describe("bounded and honest about incompleteness", () => {
 });
 
 // ===========================================================================
+describe("UPSTREAM CAPS MAKE THE VIEW BOUNDED - corrected after review", () => {
+  /**
+   * The first version derived `bounded` from the scan bounds only, so a
+   * signal with retrieval and evaluation both complete but a sixth ASSESSED
+   * candidate dropped at Task 012's presentation cap reported `bounded:
+   * false`. A posture over five of six is a posture over a subset - and the
+   * sixth may be the only contradiction.
+   */
+  const five = () => Array.from({ length: STRATEGY_LIMITS.maxPatterns }, (_, i) =>
+    item({ patternKey: String(i).repeat(32).slice(0, 32) }));
+
+  function proposal(items: HistoricalItem[], extra: Record<string, unknown>) {
+    const p = deriveStrategy(presentSignal(items, extra));
+    if (p.kind !== "proposal") throw new Error(p.kind);
+    return p;
+  }
+
+  it("A. presentation limit: complete scans, full page, one more assessed - BOUNDED", () => {
+    const p = proposal(five(), {
+      retrieved: 6, evaluated: 6, omitted: { presentation_limit: 1 },
+    });
+    expect(p.patterns).toHaveLength(STRATEGY_LIMITS.maxPatterns);
+    expect(p.bounded).toBe(true);
+    expect(p.boundedBy).toEqual(["presentation_limit"]);
+  });
+
+  it("B. size limit: otherwise complete - BOUNDED", () => {
+    const p = proposal([item()], { retrieved: 2, evaluated: 2, omitted: { size_limit: 1 } });
+    expect(p.bounded).toBe(true);
+    expect(p.boundedBy).toEqual(["size_limit"]);
+  });
+
+  it("C. evaluation limit: retrieval complete - BOUNDED", () => {
+    const p = proposal([item()], { retrieved: 3, evaluated: 1, omitted: { evaluation_limit: 2 } });
+    expect(p.bounded).toBe(true);
+    expect(p.boundedBy).toEqual(["evaluation_limit"]);
+  });
+
+  it("D. a contradiction hidden beyond the presentation cap is neither invented nor denied", () => {
+    /**
+     * Five supported patterns fill the page; the fixture KNOWS a contradicted
+     * candidate was the one dropped. Task 013 cannot know that - it must not
+     * reconstruct omitted records - so it must derive the posture from what it
+     * received AND mark the view bounded. "No contradiction was observed in
+     * the presented subset" is what it may say; "no contradiction exists" is
+     * what it must never say.
+     */
+    const p = proposal(five(), { retrieved: 6, evaluated: 6, omitted: { presentation_limit: 1 } });
+    expect(p.posture).toBe("established");   // derived only from what was received
+    expect(p.contradicted).toBe(0);           // not invented
+    expect(p.bounded).toBe(true);             // and not claimed complete
+    const text = renderStrategy(p)!;
+    expect(text).toContain("BOUNDED, not complete");
+    expect(text).toContain("presentation cap");
+    expect(text).toContain("a contradiction beyond the bound cannot be ruled out");
+    expect(text).toContain("presented to this strategy");
+  });
+
+  it("D2. the same, end to end through the Task 012 builder", () => {
+    /**
+     * Not a constructed signal: real records, real retrieval order, real cap.
+     * Retrieval order is presentation order (Task 012), and Task 010 ranks by
+     * distinct query terms matched. Five anchors match all five terms; the one
+     * contradicted anchor matches two and ranks sixth. Every corroborator
+     * shares no term with the request - note the task type "add-endpoint" is
+     * indexed too, so the request must not say "endpoint" - and is never
+     * retrieved. So the builder
+     * evaluates six, presents five, and the sixth - the only contradiction -
+     * is exactly the candidate dropped at the presentation cap.
+     */
+    const approaches = ["sliding window", "leaky counter", "fixed ceiling", "sharded ledger", "queued admission"];
+    expect(approaches).toHaveLength(STRATEGY_LIMITS.maxPatterns);
+    for (const approach of approaches) {
+      write("alpha", {
+        planSummary: `rate limiting token bucket variant: ${approach}`,
+        successfulPatterns: [approach], sources: GROUNDED,
+      });
+      for (let j = 0; j < 3; j += 1) write("alpha", { successfulPatterns: [approach], sources: GROUNDED });
+    }
+    write("alpha", { planSummary: "rate limiting", successfulPatterns: ["global mutex"], sources: GROUNDED });
+    for (let j = 0; j < 3; j += 1) write("alpha", { failedPatterns: ["global mutex"], sources: GROUNDED });
+
+    const signal = signalFor("alpha", "rate limiting token bucket variant");
+    if (signal.kind !== "present") throw new Error(signal.kind);
+    expect(signal.retrieved).toBe(STRATEGY_LIMITS.maxPatterns + 1);
+    expect(signal.evaluated).toBe(STRATEGY_LIMITS.maxPatterns + 1);
+    expect(signal.retrievalBounded).toBe(false);
+    expect(signal.evaluationsBounded).toBe(0);
+    expect(signal.items).toHaveLength(STRATEGY_LIMITS.maxPatterns);
+    expect(signal.omitted).toEqual({ presentation_limit: 1 });
+
+    const p = deriveStrategy(signal);
+    if (p.kind !== "proposal") throw new Error(p.kind);
+    // The old formula - scan bounds only - returned false for exactly this.
+    expect(p.posture).toBe("established");
+    expect(p.contradicted).toBe(0);
+    expect(p.bounded).toBe(true);
+    expect(p.boundedBy).toEqual(["presentation_limit"]);
+    expect(renderStrategy(p)).toContain("BOUNDED, not complete");
+  }, 60_000);
+
+  it("E. the complete case is still reported complete - no overcorrection", () => {
+    const p = proposal([item(), item({ patternKey: "1".repeat(32) })], {
+      retrieved: 2, evaluated: 2, omitted: {},
+    });
+    expect(p.bounded).toBe(false);
+    expect(p.boundedBy).toEqual([]);
+    expect(renderStrategy(p)).not.toContain("BOUNDED");
+  });
+
+  it("G. non-capping omissions do NOT bound the view", () => {
+    /**
+     * Distinctions Task 012 was built to keep. A duplicate is the same fact
+     * already represented; an insufficient-evidence candidate had nothing
+     * assessable to lose; a refused candidate is not evidence at all. None of
+     * them means assessed evidence was dropped, so none of them is a bound.
+     * The refused count is carried separately for the human.
+     */
+    const p = proposal([item()], {
+      retrieved: 6, evaluated: 6,
+      omitted: { duplicate: 2, insufficient_evidence: 2, evaluation_failed: 1 },
+    });
+    expect(p.bounded).toBe(false);
+    expect(p.boundedBy).toEqual([]);
+    expect(p.refused).toBe(1);
+    expect(summariseStrategy(p).refused).toBe(1);
+  });
+
+  it("classifies exactly the three capping omissions, and the type enforces it", () => {
+    expect([...CAPPING_OMISSIONS].sort()).toEqual(["evaluation_limit", "presentation_limit", "size_limit"]);
+  });
+
+  it("combines scan bounds and caps, in a fixed order", () => {
+    const p = proposal([item({ evaluationBounded: true })], {
+      retrievalBounded: true, retrievalStop: "scan_incomplete", evaluationsBounded: 1,
+      evaluationStops: ["candidate_limit"], omitted: { size_limit: 1, presentation_limit: 2 },
+    });
+    expect(p.boundedBy).toEqual(["retrieval_scan", "evaluation_scan", "presentation_limit", "size_limit"]);
+  });
+
+  it("F. a bounded signal derives byte-identically regardless of item order", () => {
+    const items = [
+      item({ patternKey: "1".repeat(32) }),
+      item({ patternKey: "2".repeat(32), status: "contradicted", confidence: 0, supporting: 0, contradicting: 2 }),
+      item({ patternKey: "3".repeat(32), confidence: 33, supporting: 1 }),
+    ];
+    const extra = { retrieved: 5, evaluated: 5, omitted: { presentation_limit: 2 } };
+    const a = JSON.stringify(deriveStrategy(presentSignal(items, extra)));
+    const b = JSON.stringify(deriveStrategy(presentSignal([...items].reverse(), extra)));
+    const c = JSON.stringify(deriveStrategy(presentSignal([items[2]!, items[0]!, items[1]!], extra)));
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    expect(JSON.parse(a).bounded).toBe(true);
+  });
+});
+
+// ===========================================================================
 describe("deterministic ordering", () => {
   it("orders by status precedence, confidence, then pattern key - a total order", () => {
     const shuffled = [
@@ -432,7 +589,10 @@ describe("a proposal is not authority", () => {
 
   it("keeps the summary free of patterns and text", () => {
     const s = summariseStrategy(deriveStrategy(presentSignal([item()])));
-    expect(Object.keys(s).sort()).toEqual(["bounded", "contradicted", "kind", "patterns", "posture", "supported", "uncertain"]);
+    expect(Object.keys(s).sort()).toEqual([
+      "bounded", "boundedBy", "contradicted", "kind", "patterns", "posture", "refused",
+      "supported", "uncertain",
+    ]);
     expect(typeof s.patterns).toBe("number");
   });
 });

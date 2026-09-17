@@ -1,12 +1,13 @@
 # Learning Foundation — Architectural Direction
 
-**Status:** ARCHITECTURE ONLY. **No learning subsystem exists.** Not approved —
-approval is the Project Director's decision.
+**Status:** ARCHITECTURAL DIRECTION, written before any learning code existed.
+The status table in §11 is the current record of what has since been built
+(Tasks 009–013, each with its own `PHASE-0NN.md`); the paragraphs below
+describe the direction as it stood at Task 008 and are kept for history.
 
-> **Nothing in this document is implemented as behaviour.** There is no
-> experience store, no retrieval, no confidence evaluator, and nothing in the
-> workflow writes a record. `src/domain/experience.ts` declares the shape; a
-> test asserts no production code imports it.
+> **As written at Task 008:** nothing in this document was implemented as
+> behaviour — no experience store, no retrieval, no confidence evaluator, and
+> nothing in the workflow wrote a record. That is no longer true; see §11.
 >
 > **This document has been corrected.** Two claims in its first version were
 > false — that the absence of a `content` field prevented cross-project leakage,

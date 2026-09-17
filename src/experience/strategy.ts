@@ -1,8 +1,9 @@
 import type { HistoricalSignal, HistoricalItem } from "../domain/historicalSignal.js";
 import {
-  StrategyProposal, STRATEGY_LIMITS,
+  StrategyProposal, STRATEGY_LIMITS, CAPPING_OMISSIONS,
   type StrategyProposal as TStrategyProposal,
   type StrategyPosture,
+  type BoundReason,
 } from "../domain/strategy.js";
 
 /**
@@ -86,6 +87,26 @@ function postureOf(supported: number, contradicted: number): StrategyPosture {
   return "inconclusive";
 }
 
+/**
+ * EVERY REASON THE STRATEGY'S VIEW IS INCOMPLETE.
+ *
+ * Reads the signal's documented completeness information and nothing else. It
+ * does not reconstruct omitted candidates, re-run retrieval, or touch the
+ * store - it interprets what Task 012 already said about its own bounds. The
+ * two scan bounds come from the coverage fields; the three capping omissions
+ * come from `omitted`, by the classification in `CAPPING_OMISSIONS`. Order is
+ * fixed by the enum, so the list is deterministic.
+ */
+function boundsOf(signal: Extract<HistoricalSignal, { kind: "present" }>): BoundReason[] {
+  const reasons: BoundReason[] = [];
+  if (signal.retrievalBounded) reasons.push("retrieval_scan");
+  if (signal.evaluationsBounded > 0) reasons.push("evaluation_scan");
+  for (const reason of CAPPING_OMISSIONS) {
+    if ((signal.omitted[reason] ?? 0) > 0) reasons.push(reason);
+  }
+  return reasons;
+}
+
 export function deriveStrategy(signal: HistoricalSignal): TStrategyProposal {
   if (signal.kind === "unavailable") {
     return StrategyProposal.parse({ kind: "unavailable", reason: signal.reason });
@@ -122,6 +143,14 @@ export function deriveStrategy(signal: HistoricalSignal): TStrategyProposal {
     contradictingVotes += pattern.contradicting;
   }
 
+  /**
+   * Any bound anywhere underneath - a scan that stopped OR a cap that dropped
+   * assessed candidates - makes the proposal bounded. A posture over five of
+   * six candidates is a posture over a subset, and the sixth may be the one
+   * contradiction. A partial look must never present as a complete one.
+   */
+  const boundedBy = boundsOf(signal);
+
   return StrategyProposal.parse({
     kind: "proposal",
     posture: postureOf(supported, contradicted),
@@ -131,11 +160,11 @@ export function deriveStrategy(signal: HistoricalSignal): TStrategyProposal {
     uncertain,
     supportingVotes,
     contradictingVotes,
-    // Any bound anywhere underneath makes the proposal bounded. A partial look
-    // must never present as a complete one.
-    bounded: signal.retrievalBounded || signal.evaluationsBounded > 0,
+    bounded: boundedBy.length > 0,
+    boundedBy,
     retrievalStop: signal.retrievalStop,
     evaluationsBounded: signal.evaluationsBounded,
+    refused: signal.omitted.evaluation_failed ?? 0,
     omitted: signal.omitted,
   });
 }
@@ -157,14 +186,27 @@ export function renderStrategy(proposal: TStrategyProposal): string | null {
   const handles = proposal.patterns
     .map((p) => `${p.patternKey.slice(0, 12)}:${p.status}`)
     .join(", ");
+  // The reasons are enum members rendered under a fixed vocabulary - no text
+  // from any record, and no prose beyond this map.
+  const REASON_WORDS: Readonly<Record<BoundReason, string>> = {
+    retrieval_scan: "retrieval scan stopped early",
+    evaluation_scan: "an evaluation stopped early",
+    presentation_limit: "assessed patterns were dropped at the presentation cap",
+    size_limit: "assessed patterns were dropped at the size cap",
+    evaluation_limit: "candidates were never evaluated past the evaluation cap",
+  };
   const bounded = proposal.bounded
-    ? " The underlying look at the project's history was BOUNDED, not complete."
+    ? " The underlying look at the project's history was BOUNDED, not complete: " +
+      proposal.boundedBy.map((r) => REASON_WORDS[r]).join("; ") +
+      ". The counts above describe the patterns this strategy received, not the " +
+      "whole project, and a contradiction beyond the bound cannot be ruled out."
     : "";
 
   return (
     `Derived strategy posture from this project's evaluated history: ` +
     `${proposal.posture.toUpperCase()}. ` +
-    `Relevant patterns with independent evidence: ${String(proposal.supported)} supported, ` +
+    `Among the ${String(proposal.patterns.length)} pattern(s) presented to this strategy: ` +
+    `${String(proposal.supported)} supported, ` +
     `${String(proposal.contradicted)} contradicted, ${String(proposal.uncertain)} uncertain ` +
     `(${String(proposal.supportingVotes)} supporting and ` +
     `${String(proposal.contradictingVotes)} contradicting independent records in total). ` +

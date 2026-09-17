@@ -68,8 +68,13 @@ StrategyProposal =
       patterns: HistoricalItem[≤5],      Task 012's items, reused UNCHANGED
       supported, contradicted, uncertain,          pattern counts by Task 011 status
       supportingVotes, contradictingVotes,         independent-record totals
-      bounded, retrievalStop, evaluationsBounded,  never hidden
+      bounded, boundedBy: BoundReason[],           never hidden - see §12
+      retrievalStop, evaluationsBounded,
+      refused,                                     evaluator refusals; a fact, not a bound
       omitted }                                    carried forward from the signal
+
+BoundReason = "retrieval_scan" | "evaluation_scan"
+            | "presentation_limit" | "size_limit" | "evaluation_limit"
 ```
 
 All `.strict()`. Every string is an enum member or, inside a pattern, a
@@ -129,6 +134,12 @@ the signal schema refuses more before the strategy is ever called) and
 shortened** — the assembler would refuse an oversized record, and a strategy is
 not critical context, so absence is the correct failure direction. Task 007
 enforces `maxHistoricalStrategy: 1` independently.
+
+Bounds are inherited as well as imposed. The signal Task 013 receives is itself
+a bounded **projection** of the project's history — Task 012 presents at most
+`maxPresented` items and omits assessed candidates beyond its presentation,
+size and evaluation caps. Those upstream caps bound the strategy exactly as
+the strategy's own limits do; §12 defines how they are carried.
 
 ---
 
@@ -219,10 +230,78 @@ as a decision is caught.
 
 ## 12. Incomplete-data semantics
 
+> **Corrected after independent review.** The first version derived
+> `bounded` from the scan bounds only — `retrievalBounded || evaluationsBounded > 0`
+> — and ignored Task 012's own caps. This state was therefore reported as
+> **complete**: retrieval complete, evaluation complete, five items presented,
+> a sixth *assessed* candidate omitted for `presentation_limit`. A posture over
+> five of six is a posture over a subset, and the sixth may be the only
+> contradiction. That is the difference between "no contradiction was observed
+> in the presented subset" and "no contradiction exists", and only the bound
+> flag keeps those two claims apart.
+
 `unavailable`, `none` and `insufficient` are distinct and none renders to the
-model. `proposal.bounded` is true when retrieval was bounded **or any**
-presented evaluation was bounded, and the rendering says so in capitals. A
-mutation forcing `bounded: false` is caught.
+model.
+
+**What bounds a proposal.** `bounded` is true when `boundedBy` is non-empty,
+and `boundedBy` lists every reason the view is incomplete, in a fixed order:
+
+| Reason | Source | Meaning |
+| --- | --- | --- |
+| `retrieval_scan` | signal `retrievalBounded` | Task 010 could not enumerate the project completely |
+| `evaluation_scan` | signal `evaluationsBounded > 0` | at least one presented evaluation stopped at a Task 011 bound |
+| `presentation_limit` | `omitted.presentation_limit > 0` | **assessed** candidates were dropped at Task 012's presentation cap (the builder emits this reason only *after* the insufficient-evidence check) |
+| `size_limit` | `omitted.size_limit > 0` | assessed candidates were built and dropped for size |
+| `evaluation_limit` | `omitted.evaluation_limit > 0` | candidates were never evaluated at all |
+
+The three capping reasons are the set `CAPPING_OMISSIONS`, typed as a subset
+of `OmissionReason` so a reason cannot be listed there that Task 012 does not
+emit.
+
+**What does not bound a proposal.** The naïve fix — `bounded = omitted is
+non-empty` — was rejected deliberately, because it would relabel every omission
+as a resource bound and throw away distinctions Task 012 was built to keep:
+
+- `insufficient_evidence` — the candidate was fully considered and had nothing
+  independently assessable. Nothing that could have entered a posture was lost.
+- `duplicate` — the same fact, already represented in the presented set.
+- `evaluation_failed` — the candidate was refused as corrupt, missing or
+  unreadable. Under Tasks 009 and 011 that is *not evidence at all*, so it is
+  not a bound on the evidence; but it is a distinct fact — relevant history
+  the evaluator could not read — and is carried as `refused` on the proposal
+  and the summary so the human sees it.
+
+A signal whose only omissions are those three derives `bounded: false`.
+
+**How the strategy is derived from a bounded signal.** From what it received,
+and nothing else. `deriveStrategy` does not reconstruct omitted candidates,
+re-run retrieval, call the evaluator, or touch the store; it reads the signal's
+documented completeness fields and interprets them. Counts, votes and posture
+are computed over the presented items — and when the view is bounded they are
+statements about *those items*, not about the project.
+
+**Rendering.** The counts sentence now reads "Among the N pattern(s) presented
+to this strategy: …". When bounded, the rendering states in capitals that the
+underlying look was **BOUNDED, not complete**, lists every reason under a fixed
+vocabulary (enum members mapped to fixed phrases — no record text, no other
+prose), and says that the counts describe the patterns the strategy received,
+not the whole project, and that a contradiction beyond the bound cannot be
+ruled out. When not bounded, none of that appears.
+
+**Tests** (`UPSTREAM CAPS MAKE THE VIEW BOUNDED`): presentation limit (A),
+size limit (B) and evaluation limit (C) each bound an otherwise-complete
+signal; a contradiction hidden beyond the presentation cap (D) yields
+`established`, `contradicted: 0`, `bounded: true` — neither invented nor
+denied — with the bound rendered; D2 reproduces that end to end through the
+real builder (six assessed, five presented, the sixth the only contradiction,
+`omitted: { presentation_limit: 1 }`); the complete case stays `bounded:
+false` with no BOUNDED text (E); a bounded signal derives byte-identically
+under reversed and shuffled item order (F); and omissions of only
+`duplicate` / `insufficient_evidence` / `evaluation_failed` do not bound the
+view while `refused` is reported (G). Mutations 19–24 in §14 cover the old
+formula, the caps ignored in `boundsOf`, always-bounded, the naïve
+any-omission formula, a cap dropped from the classification, and a rendering
+that hides the bound.
 
 ---
 
@@ -246,7 +325,8 @@ test.
 
 ## 14. Mutation testing
 
-Eighteen mutations. Each is **typechecked before its tests run** — a mutation
+Twenty-four mutations — eighteen original and six added by the incomplete-data
+correction. Each is **typechecked before its tests run** — a mutation
 that does not compile proves nothing and is not counted. Verdict: caught only
 when vitest exits non-zero *and* reports failures. Source diffed against backups
 after each and at the end.
@@ -271,6 +351,12 @@ after each and at the end.
 | 16 | strategy appended to the task description | caught |
 | 17 | posture persisted via `saveDecision` | caught |
 | 18 | proposal schema admits `approved`; node acts on it | caught |
+| 19 | `bounded` reverted to the pre-correction formula (scan bounds only) | caught |
+| 20 | `boundsOf` ignores `CAPPING_OMISSIONS` (`bounded` and `boundedBy` both) | caught |
+| 21 | `bounded` forced true — the complete case reported as bounded | caught |
+| 22 | naïve formula: any omission at all makes the view bounded | caught |
+| 23 | `presentation_limit` dropped from `CAPPING_OMISSIONS` | caught |
+| 24 | rendering states BOUNDED only when retrieval was bounded | caught |
 
 Exact failing counts are in the completion report. **Three mutations survived
 the first run and two did not compile**; all five were investigated rather than

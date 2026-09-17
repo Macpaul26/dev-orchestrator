@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   HistoricalItem, HISTORICAL_SIGNAL_LIMITS, OmissionReason,
+  type OmissionReason as TOmissionReason,
 } from "./historicalSignal.js";
 import { RetrievalStopReason } from "./experienceRetrieval.js";
 
@@ -48,6 +49,72 @@ export const STRATEGY_LIMITS = {
   /** Characters the rendered proposal may occupy in the context. */
   maxRenderedChars: 900,
 } as const;
+
+/**
+ * WHY A PROPOSAL'S VIEW OF THE EVIDENCE IS INCOMPLETE.
+ *
+ * ---------------------------------------------------------------------------
+ * CORRECTED AFTER INDEPENDENT REVIEW
+ * ---------------------------------------------------------------------------
+ * The first version derived `bounded` from the signal's SCAN bounds only -
+ * whether retrieval or evaluation stopped early. It ignored that the signal
+ * is itself a bounded PROJECTION: Task 012 presents at most `maxPresented`
+ * items and omits assessed candidates beyond that cap, or beyond the size and
+ * evaluation caps. So this state was possible and reported as complete:
+ *
+ *     retrieval complete, evaluation complete, five items presented,
+ *     a sixth ASSESSED candidate omitted for presentation_limit
+ *
+ * A posture over five of six is a bounded posture. Worse, the sixth could have
+ * been the only contradiction. "No contradiction was observed in the presented
+ * subset" and "no contradiction exists" are different claims, and only the
+ * bound flag keeps them apart.
+ *
+ * ---------------------------------------------------------------------------
+ * NOT EVERY OMISSION IS A BOUND
+ * ---------------------------------------------------------------------------
+ * The classification follows the builder's own ordering, not a guess:
+ *
+ *   presentation_limit   emitted AFTER the insufficient-evidence check, so the
+ *                        omitted candidate was assessed. Evidence lost. A CAP.
+ *   size_limit           assessed, item built, dropped for size. A CAP.
+ *   evaluation_limit     never evaluated at all. Unknown evidence. A CAP.
+ *
+ *   insufficient_evidence  fully considered; nothing assessable. Nothing that
+ *                          could have entered a posture was lost. NOT a cap.
+ *   duplicate              the same fact, already represented. NOT a cap.
+ *   evaluation_failed      refused as corrupt or unreadable - not evidence at
+ *                          all by Task 009 and 011's rules. NOT a cap, but a
+ *                          distinct fact, carried as `refused` so the human
+ *                          can see relevant candidates that could not be read.
+ *
+ * Writing `bounded = omitted is non-empty` would have relabelled all six as a
+ * resource bound and thrown away distinctions Task 012 was built to keep.
+ */
+export const BoundReason = z.enum([
+  /** Task 010 could not enumerate the project completely. */
+  "retrieval_scan",
+  /** At least one presented evaluation stopped at a Task 011 bound. */
+  "evaluation_scan",
+  /** Assessed candidates were dropped at Task 012's presentation cap. */
+  "presentation_limit",
+  /** Assessed candidates were dropped at Task 012's size cap. */
+  "size_limit",
+  /** Candidates were never evaluated because Task 012's evaluation cap was hit. */
+  "evaluation_limit",
+]);
+export type BoundReason = z.infer<typeof BoundReason>;
+
+/**
+ * The omission reasons that mean assessed or assessable evidence was lost.
+ *
+ * Typed as the INTERSECTION of the omission and bound vocabularies: a capping
+ * omission is, by definition, an omission that is also a reason the view is
+ * incomplete. The compiler enforces that nothing else can be listed here.
+ */
+export const CAPPING_OMISSIONS: readonly Extract<TOmissionReason, BoundReason>[] = [
+  "presentation_limit", "size_limit", "evaluation_limit",
+] as const;
 
 /**
  * THE POSTURE - what the evaluated history, taken together, looks like.
@@ -111,10 +178,22 @@ export const StrategyProposal = z.discriminatedUnion("kind", [
     /** Sum of independent votes across the patterns. Volume, not truth. */
     supportingVotes: z.number().int().nonnegative(),
     contradictingVotes: z.number().int().nonnegative(),
-    /** True when any part of the underlying look was bounded. Never hidden. */
+    /**
+     * True when the evidence this proposal was derived from is an INCOMPLETE
+     * view - any scan bound OR any capping omission upstream. Never hidden.
+     * When true, `supported`/`contradicted`/`uncertain` describe the received
+     * subset and must not be read as facts about the whole project.
+     */
     bounded: z.boolean(),
+    /** Every reason the view is incomplete. Empty exactly when `bounded` is false. */
+    boundedBy: z.array(BoundReason).max(5),
     retrievalStop: RetrievalStopReason.nullable(),
     evaluationsBounded: z.number().int().nonnegative(),
+    /**
+     * Relevant candidates the evaluator refused - corrupt, missing, unreadable.
+     * Not evidence, and not a bound; a distinct fact for the human.
+     */
+    refused: z.number().int().nonnegative(),
     /** What the signal omitted and why, carried forward unchanged. */
     omitted: z.partialRecord(OmissionReason, z.number().int().nonnegative()),
   }).strict(),
@@ -155,6 +234,8 @@ export const StrategySummary = z.object({
   contradicted: z.number().int().nonnegative().default(0),
   uncertain: z.number().int().nonnegative().default(0),
   bounded: z.boolean().default(false),
+  boundedBy: z.array(BoundReason).max(5).default([]),
+  refused: z.number().int().nonnegative().default(0),
 }).strict();
 export type StrategySummary = z.infer<typeof StrategySummary>;
 
@@ -175,6 +256,8 @@ export function summariseStrategy(proposal: StrategyProposal): StrategySummary {
         contradicted: proposal.contradicted,
         uncertain: proposal.uncertain,
         bounded: proposal.bounded,
+        boundedBy: proposal.boundedBy,
+        refused: proposal.refused,
       });
   }
 }
