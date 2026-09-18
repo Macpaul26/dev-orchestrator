@@ -160,6 +160,12 @@ human-approved grant, and disallows every built-in tool. Exercised against
 the real binary: plan → implement → verify → review in 12 seconds, with the
 change attributed and the claim matching. See [docs/BRIDGE.md](docs/BRIDGE.md).
 
+**The Front Desk is connected.** A local page with a microphone: English in,
+one orchestrator command out, gates narrated back in plain sentences by code
+from trusted state. A decision is executed only when the person's own words
+say so - the translating model cannot approve anything. See
+[docs/FRONT-DESK.md](docs/FRONT-DESK.md).
+
 Since Task 014 the workflow WRITES experience - one record per iteration,
 after the human's review decision, through the outcome recorder and nowhere
 else. It READS it through the plan node, through the signal builder, and
@@ -302,6 +308,7 @@ Tests assert each of those.
 | --- | --- |
 | [docs/PHASE-009.md](docs/PHASE-009.md) | Experience / learning memory: the storage model, project isolation, content-derived identity, the integrity model and what it is NOT, the cross-process quota lock, the ownership protocol and its liveness proof, crash recovery, bounded directory accounting, corruption handling, and why nothing writes to the store yet |
 | [docs/PHASE-010.md](docs/PHASE-010.md) | Experience retrieval: the query model, the searchable projection and what is deliberately excluded from it, the tokenizer and ranking policy, deterministic total ordering, bounds, incomplete-retrieval semantics, corruption handling, why relevance is not confidence, and why similarity search and reasoning integration are deferred |
+| [docs/FRONT-DESK.md](docs/FRONT-DESK.md) | The front desk: a loopback page with voice and text, the translation-only model call, the deterministic decision guard, code-written narration of gates, and its limits |
 | [docs/BRIDGE.md](docs/BRIDGE.md) | The Claude Code bridge: why the adapter needed a protocol client, the four-tool MCP design with every built-in tool disallowed, configuration, the two measured runs (including the exit bug), and the honest limits |
 | [docs/PHASE-014.md](docs/PHASE-014.md) | The autonomous loop: the loop definition, the two new nodes and the one edge back, iteration identity, approval binding by id and digest, the trusted bound and its first-value-wins channel, stop conditions and safety conditions, restart and idempotency, failure semantics, the learn step, the self-modification refusal, observability, twenty mutations and twelve end-to-end scenarios |
 | [docs/PHASE-013.md](docs/PHASE-013.md) | Strategy adaptation: a pure function over the historical signal, the posture vocabulary and derivation policy, contradiction-first precedence, the HISTORICAL_STRATEGY provenance at rank 15, the unconditional plan-approval edge, no persistence, historical-text safety re-proven, and eighteen mutations with the five that first survived and why |
