@@ -308,7 +308,9 @@ program
       line(`  claude code adapter: MISCONFIGURED - ${adapterError}`);
     } else if (!adapter) {
       line("  claude code adapter: not configured (no agent can be launched)");
-      line(`  configure with ${ENV_EXECUTABLE}=<absolute path>`);
+      line(`  configure with ${ENV_EXECUTABLE}=<absolute path to node> and`);
+      line("  ORCHESTRATOR_CLAUDE_ARGS=<absolute path to dist/bridge/claudeBridge.js>");
+      line("  (the bridge speaks the tool protocol on Claude Code's behalf; see docs/BRIDGE.md)");
     } else {
       line("  claude code adapter: configured");
       line(`  environment allowlist: ${adapter.environmentAllowlist.length === 0
